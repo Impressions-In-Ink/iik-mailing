@@ -1,0 +1,23 @@
+{
+  "name": "iik-mailing",
+  "version": "1.0.0",
+  "description": "AccuZIP address checking (CASS), its grader, and the USPS Marketing Mail presort. Shared by two separately deployed backends so an address one app calls deliverable is never one the other refuses.",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "src/"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "lint": "eslint ."
+  },
+  "engines": {
+    "node": "22"
+  },
+  "devDependencies": {
+    "eslint": "^8.15.0",
+    "eslint-config-google": "^0.14.0"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
