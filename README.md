@@ -14,7 +14,7 @@ must never be one the other refuses.
 | Consumer | What it does with this |
 |---|---|
 | Admin app (`impressions-admin` functions) | grades mailing lists (`validateAddresses`) and ship-to addresses before a label is bought; standardizes the address the tax resolver looks up |
-| Impulse (`impressions-connect` functions, codebase `connect`) | checks every recipient when a mailing is filed; presorts runs of 200+ pieces |
+| Impulse (`impressions-connect` functions, codebase `connect`) | checks every recipient when a mailing is filed; presorts runs of 200+ pieces; estimates postage at checkout (`estimateMailing`) |
 
 ## What's in it
 
@@ -22,6 +22,7 @@ must never be one the other refuses.
 |---|---|
 | `src/classify.js` | What a CASS result means: verified, corrected, missing_secondary, vacant, undeliverable. |
 | `src/cass.js` | The CASS request row, the POST (at most 20 rows), and the readings of the reply. |
+| `src/estimate.js` | The checkout estimate: drops rows that can't mail (with reasons), uploads the rest, and reads AccuZIP's free quote. Never processes, never downloads, never checks addresses. |
 | `src/presort.js` | AccuZIP's cloud presort: the upload file, the settings (permit, IMb, NCOALink with a PAF), the check of a finished job before its billed download, and the mapping back to recipients. |
 
 ## Keys stay with the apps
