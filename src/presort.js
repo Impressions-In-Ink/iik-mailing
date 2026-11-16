@@ -133,7 +133,7 @@ function presortCsv(recipients) {
  * AccuZIP's id is its own part of the 18-character USPS PAF ID: bytes
  * 13-18, "the unique ID to that list assigned by the Licensee" (USPS
  * PAF Guide). So it is AT MOST six letters/digits, and AccuZIP doesn't
- * pad it: it issued CH227 (five) and EK2590 (six). Anything longer is
+ * pad it: it issues five-character ids as well as six. Anything longer is
  * something else from the paperwork, like the AccuZIP account number
  * or the whole 18-character USPS id.
  * @param {*} v the stored id.
