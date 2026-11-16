@@ -128,14 +128,20 @@ function presortCsv(recipients) {
 }
 
 /**
- * A list owner's AccuZIP PAF id in AccuZIP's form (six letters/digits,
- * e.g. X00001), or "" when it isn't one. PURE.
+ * A list owner's AccuZIP PAF id, or "" when it can't be one. PURE.
+ *
+ * AccuZIP's id is its own part of the 18-character USPS PAF ID: bytes
+ * 13-18, "the unique ID to that list assigned by the Licensee" (USPS
+ * PAF Guide). So it is AT MOST six letters/digits, and AccuZIP doesn't
+ * pad it: it issues five-character ids as well as six. Anything longer is
+ * something else from the paperwork, like the AccuZIP account number
+ * or the whole 18-character USPS id.
  * @param {*} v the stored id.
  * @return {string} the id, upper case, or "".
  */
 function cleanPafId(v) {
   const id = String(v == null ? "" : v).trim().toUpperCase();
-  return /^[A-Z0-9]{6}$/.test(id) ? id : "";
+  return /^[A-Z0-9]{1,6}$/.test(id) ? id : "";
 }
 
 /**
