@@ -24,6 +24,11 @@ must never be one the other refuses.
 | `src/cass.js` | The CASS request row, the POST (at most 20 rows), and the readings of the reply. |
 | `src/presort.js` | AccuZIP's cloud presort: the upload file, the settings (permit, IMb, NCOALink with a PAF), the check of a finished job before its billed download, and the mapping back to recipients. |
 
+### Presort options (both off unless the caller asks)
+
+- **`forwardMovers: true`** (since 1.1.0): a mover NCOALink found a new address for mails there, instead of being left out. AccuZIP writes the new address into the standardized address fields, so **the caller must print those fields**, never the address it uploaded. Moves with no address to mail to (left no forwarding address, abroad, unconfirmed, 18-48 months ago) are still left out.
+- **`nonprofit: {name, authNumber, address?}`** (since 1.1.0): prices the run as Nonprofit Marketing Mail for an organization USPS has authorized (PS Form 3624). Its name and number go on the postage statement. Pass `{nonprofit: true}` to `presortOutcome` so a finished job priced at the other rate stops before its billed download.
+
 ## Keys stay with the apps
 
 No keys live here. The CASS key (`ACCUZIP_API_KEY`) and the Direct Mail key
