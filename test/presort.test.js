@@ -128,8 +128,8 @@ test("no PAF on file, no NCOALink claim and no process", () => {
   // Not a PAF id: nothing, words, punctuation, longer than the USPS id's
   // six licensee characters (the AccuZIP account number, the whole
   // 18-character USPS id).
-  for (const pafId of [null, "", "  ", "not a paf", "X01234X", "CH-227",
-    "CH 227", "1234567890", "ACZ1561499520AB123"]) {
+  for (const pafId of [null, "", "  ", "not a paf", "X01234X", "AB-123",
+    "AB 123", "1234567890", "ACZ1561499520AB123"]) {
     assert.throws(() => presortSettings(SETTINGS, {...JOB, pafId}),
         /PAF/, `PAF ${JSON.stringify(pafId)}`);
     assert.throws(() => presortProcess(pafId), /PAF/,
