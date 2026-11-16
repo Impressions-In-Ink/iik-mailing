@@ -125,7 +125,11 @@ test("Move Update is claimed as NCOALink, under the list owner's PAF",
     });
 
 test("no PAF on file, no NCOALink claim and no process", () => {
-  for (const pafId of [null, "", "  ", "X0123", "not a paf", "X01234X"]) {
+  // Not a PAF id: nothing, words, punctuation, longer than the USPS id's
+  // six licensee characters (the AccuZIP account number, the whole
+  // 18-character USPS id).
+  for (const pafId of [null, "", "  ", "not a paf", "X01234X", "AB-123",
+    "AB 123", "1234567890", "ACZ1561499520AB123"]) {
     assert.throws(() => presortSettings(SETTINGS, {...JOB, pafId}),
         /PAF/, `PAF ${JSON.stringify(pafId)}`);
     assert.throws(() => presortProcess(pafId), /PAF/,
@@ -135,6 +139,15 @@ test("no PAF on file, no NCOALink claim and no process", () => {
   assert.equal(presortProcess(" e00001 "), "CASS-NCOA-PRESORT");
   assert.equal(cleanPafId(" e00001 "), "E00001");
   assert.equal(cleanPafId(undefined), "");
+});
+
+test("AccuZIP's PAF ids aren't padded to six: five characters is one", () => {
+  // AccuZIP has issued ids of five and of six characters (2026-11).
+  assert.equal(cleanPafId(" ab123 "), "AB123");
+  assert.equal(cleanPafId("CD4567"), "CD4567");
+  assert.equal(presortProcess("AB123"), "CASS-NCOA-PRESORT");
+  assert.equal(presortSettings(SETTINGS, {...JOB, pafId: "ab123"})
+      .list_owner_paf_id, "AB123");
 });
 
 test("the piece comes from the product, as a Marketing Mail size", () => {
