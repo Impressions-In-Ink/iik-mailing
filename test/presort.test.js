@@ -16,8 +16,10 @@ const {
   PRESORT_MIN_PIECES,
   ID_COLUMN,
   POSTCARD_PIECE,
+  NCOA_LEFT_OUT_FORWARDING,
   needsPresort,
   cleanPafId,
+  cleanNonprofitAuth,
   presortCsv,
   presortSettings,
   presortProcess,
@@ -124,6 +126,55 @@ test("Move Update is claimed as NCOALink, under the list owner's PAF",
       "no setting claims a Move Update method this job doesn't run");
     });
 
+test("forwarding movers: a new address mails there, the rest stay out",
+    () => {
+      const s = presortSettings(SETTINGS, {...JOB, forwardMovers: true});
+      assert.equal(s.coa_flag_only, "0",
+          "AccuZIP writes the new address into the address fields");
+      assert.equal(s.filter_ncoa_01, "0", "a mover with a new address mails");
+      assert.equal(s.filter_ncoa_05, "0", "a move to a new state too");
+      for (const n of ["02", "03", "04", "77"]) {
+        assert.equal(s[`filter_ncoa_${n}`], "1",
+            `NCOALink result ${n} has no address to mail to`);
+      }
+      assert.deepEqual([...NCOA_LEFT_OUT_FORWARDING],
+          ["02", "03", "04", "77"]);
+      assert.equal(s.move_update_method, "NCOALink",
+          "still the same Move Update claim");
+      assert.equal(presortSettings(SETTINGS, {...JOB, forwardMovers: "yes"})
+          .coa_flag_only, "1", "only a real true turns it on");
+    });
+
+test("nonprofit prices only for a named, authorized organization", () => {
+  const np = {name: "  Helping   Hands ", authNumber: " 12-3456 ",
+    address: "100 Main St, Portland OR 97202"};
+  const s = presortSettings(SETTINGS, {...JOB, preparedFor: "Shop",
+    nonprofit: np});
+  assert.equal(s.mail_permit_type, "NONPROFIT");
+  assert.equal(s.prepared_for_nonprofit_authorization_number, "123456");
+  assert.equal(s.prepared_for_name_address,
+      "Helping Hands | 100 Main St, Portland OR 97202",
+      "the statement names the organization the mailing is prepared for");
+  assert.equal(presortSettings(SETTINGS, {...JOB, nonprofit: {
+    name: "Helping Hands", authNumber: "123456"}}).prepared_for_name_address,
+  "Helping Hands", "the address is optional");
+
+  const c = presortSettings(SETTINGS, {...JOB, preparedFor: "Shop"});
+  assert.equal(c.mail_permit_type, "PROFIT", "commercial unless asked");
+  assert.equal(c.prepared_for_name_address, "Shop");
+  assert.equal("prepared_for_nonprofit_authorization_number" in c, false);
+
+  for (const bad of [{name: "Helping Hands"}, {authNumber: "123456"},
+    {name: "Helping Hands", authNumber: "12345678901"},
+    {name: " ", authNumber: "123456"}]) {
+    assert.throws(() => presortSettings(SETTINGS, {...JOB, nonprofit: bad}),
+        /nonprofit/, JSON.stringify(bad));
+  }
+  assert.equal(cleanNonprofitAuth(" ab 12-34 "), "AB1234");
+  assert.equal(cleanNonprofitAuth("12.34"), "");
+  assert.equal(cleanNonprofitAuth(undefined), "");
+});
+
 test("no PAF on file, no NCOALink claim and no process", () => {
   // Not a PAF id: nothing, words, punctuation, longer than the USPS id's
   // six licensee characters (the AccuZIP account number, the whole
@@ -200,6 +251,22 @@ test("a finished job is checked before anything is downloaded", () => {
   "a run without NCOALink never mails on an NCOALink claim");
   assert.equal(presortOutcome({...ok, presort_class: "standard mail"},
       "cass-ncoa-presort").problem, "", "case doesn't matter");
+});
+
+test("the finished job is priced at the rate we asked for", () => {
+  const done = {task_state: "FINISHED", task_process: "CASS-NCOA-PRESORT",
+    presort_class: "STANDARD MAIL", mail_pay_method: "IMPRINT",
+    mail_permit_type: "PROFIT", total_presort_records: "500"};
+  assert.equal(presortOutcome(done, "CASS-NCOA-PRESORT").problem, "");
+  assert.match(presortOutcome(done, "CASS-NCOA-PRESORT",
+      {nonprofit: true}).problem,
+  /as commercial Marketing Mail, not nonprofit/);
+  const np = {...done, mail_permit_type: "NONPROFIT"};
+  assert.equal(presortOutcome(np, "CASS-NCOA-PRESORT", {nonprofit: true})
+      .problem, "");
+  assert.match(presortOutcome(np, "CASS-NCOA-PRESORT").problem,
+      /as nonprofit Marketing Mail, not commercial/,
+  "never a quiet switch to nonprofit prices either");
 });
 
 test("CSV parsing survives quotes, commas, CRLF and blank lines", () => {

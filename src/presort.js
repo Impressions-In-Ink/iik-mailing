@@ -34,9 +34,16 @@
  * standard, and the postage statement says how. We claim NCOALink, which
  * needs the list owner's PAF (Processing Acknowledgement Form) on file
  * with AccuZIP — so there is no presort without a PAF id: no settings
- * (presortSettings throws) and no process (presortProcess throws). Every
- * mover NCOALink finds is left out of the run rather than mailed at an
- * address they've left.
+ * (presortSettings throws) and no process (presortProcess throws). By
+ * default every mover NCOALink finds is left out of the run rather than
+ * mailed at an address they've left. A caller that prints AccuZIP's
+ * standardized address can forward them instead (job.forwardMovers): a
+ * mover with a new address mails there, and only the ones with no address
+ * to mail to are left out (NCOA_LEFT_OUT_FORWARDING).
+ *
+ * NONPROFIT. job.nonprofit prices the run as Nonprofit Marketing Mail for
+ * an organization USPS has authorized; its name and authorization number
+ * go on the postage statement as the party the mailing is prepared for.
  *
  * NO SILENT SWITCH. Below USPS minimums AccuZIP would quietly prepare the
  * run as First-Class, or move it to metered postage; the settings force
@@ -79,6 +86,16 @@ const PIECE_SIZES = Object.freeze(["LETTER", "FLAT"]);
  * that does mail stays the one we uploaded, so its barcode matches the
  * address printed on it. */
 const NCOA_LEFT_OUT = Object.freeze(["01", "02", "03", "04", "05", "77"]);
+
+/** Left out when the caller FORWARDS movers (job.forwardMovers): only the
+ * moves with no address to mail to: new address unconfirmed (02), left no
+ * address (03), abroad (04), and 18-48 months ago (77, which NCOALink
+ * gives no new address for). A mover with a new address (01, including a
+ * move to a new state, 05) mails there: with coa_flag_only 0 AccuZIP
+ * writes the new address into the standardized address fields, so the
+ * barcode and the address both point at it, as long as the caller prints
+ * those fields and not the address it uploaded. */
+const NCOA_LEFT_OUT_FORWARDING = Object.freeze(["02", "03", "04", "77"]);
 
 /** Settings the shop must supply before a presort can run. */
 const REQUIRED_SETTINGS = Object.freeze([
@@ -145,6 +162,19 @@ function cleanPafId(v) {
 }
 
 /**
+ * A USPS nonprofit authorization number (PS Form 3624) as AccuZIP takes
+ * it in `prepared_for_nonprofit_authorization_number`: letters and digits,
+ * at most ten; spaces and dashes typed in are dropped. "" when it can't
+ * be one. PURE.
+ * @param {*} v the number as staff typed it.
+ * @return {string} the number, upper case, or "".
+ */
+function cleanNonprofitAuth(v) {
+  const id = String(v == null ? "" : v).replace(/[\s-]+/g, "").toUpperCase();
+  return /^[A-Z0-9]{1,10}$/.test(id) ? id : "";
+}
+
+/**
  * A date as AccuZIP writes it. PURE.
  * @param {Date} d the date (its UTC day).
  * @return {string} MM/DD/YYYY.
@@ -160,10 +190,16 @@ function mmddyyyy(d) {
  * @param {object} job {piece: the product's mail piece (see
  *   POSTCARD_PIECE), pafId: the list owner's PAF id, mailingDate: Date,
  *   moveUpdateDate: Date NCOALink runs (today), jobId, title,
- *   preparedFor}.
+ *   preparedFor, and two options, both off unless asked for:
+ *   forwardMovers: true mails a mover with a new address there instead
+ *   of leaving them out (see NCOA_LEFT_OUT_FORWARDING: the caller must
+ *   print AccuZIP's standardized address fields); nonprofit: {name,
+ *   authNumber, address?} prices it as Nonprofit Marketing Mail for that
+ *   authorized organization, whose number goes on the postage statement.
  * @return {object} the JSON to PUT.
  * @throws {Error} naming every missing setting, or when the piece or the
- *   PAF is missing: no presort claims NCOALink without one.
+ *   PAF is missing: no presort claims NCOALink without one. Also when a
+ *   nonprofit mailing lacks the organization's name or a usable number.
  */
 function presortSettings(s, job) {
   const cfg = s || {};
@@ -172,6 +208,17 @@ function presortSettings(s, job) {
   if (missing.length) {
     throw new Error(`Mailing settings missing: ${missing.join(", ")}`);
   }
+  const np = job.nonprofit || null;
+  const npAuth = np ? cleanNonprofitAuth(np.authNumber) : "";
+  const npName = np ? String(np.name || "").replace(/\s+/g, " ").trim() : "";
+  if (np && (!npAuth || !npName)) {
+    throw new Error("A nonprofit mailing needs the organization's name " +
+      "and its USPS nonprofit authorization number");
+  }
+  const npAddress = np ?
+    String(np.address || "").replace(/\s+/g, " ").trim() : "";
+  const leftOut = job.forwardMovers === true ?
+    NCOA_LEFT_OUT_FORWARDING : NCOA_LEFT_OUT;
   const piece = job.piece || {};
   const dims = ["heightIn", "lengthIn", "thicknessIn", "weightOz"];
   if (!PIECE_SIZES.includes(piece.size) ||
@@ -207,7 +254,9 @@ function presortSettings(s, job) {
     "print_imb": cfg.fullService ? "1" : "0",
     "include_non_zip4": "0",
     "include_crrt": "1",
-    "mail_permit_type": "PROFIT",
+    // Nonprofit prices only for an organization USPS authorized, under its
+    // number (PS Form 3602-N "prepared for").
+    "mail_permit_type": np ? "NONPROFIT" : "PROFIT",
     "mail_pay_method": "IMPRINT",
     "mail_permit_number": String(cfg.permitNumber),
     "permit_holder_name_address": String(cfg.permitHolder),
@@ -222,7 +271,10 @@ function presortSettings(s, job) {
     "agent_or_mailer_company": String(cfg.signerCompany),
     "agent_or_mailer_phone": digits(cfg.signerPhone).slice(-10),
     "agent_or_mailer_email": String(cfg.signerEmail),
-    "prepared_for_name_address": String(job.preparedFor || ""),
+    "prepared_for_name_address": np ?
+      [npName, npAddress].filter(Boolean).join(" | ") :
+      String(job.preparedFor || ""),
+    ...(np ? {"prepared_for_nonprofit_authorization_number": npAuth} : {}),
     "statement_number": "1",
     "mailing_date": mmddyyyy(d),
     // Move Update by NCOALink, run by this very job (presortProcess).
@@ -230,9 +282,11 @@ function presortSettings(s, job) {
     "move_update_method_date": mmddyyyy(moved),
     "list_owner_paf_id": pafId,
     "ncoalink_off": "0",
-    "coa_flag_only": "1",
+    // 1: flag movers, keep the uploaded address (they're all left out).
+    // 0: write a mover's new address into the address fields (forwarding).
+    "coa_flag_only": job.forwardMovers === true ? "0" : "1",
     ...Object.fromEntries(NCOA_LEFT_OUT.map((n) => [`filter_ncoa_${n}`,
-      "1"])),
+      leftOut.includes(n) ? "1" : "0"])),
     "maildat_jobid": String(job.jobId || "").replace(/[^A-Za-z0-9]/g, "")
         .slice(-8),
     "maildat_jobtitle": String(job.title || "").slice(0, 30),
@@ -265,13 +319,18 @@ function presortProcess(pafId) {
  * PURE.
  * @param {object} q the finished QUOTE JSON.
  * @param {string} process the process we started (presortProcess()).
+ * @param {?object} opts {nonprofit: true} when we asked for nonprofit
+ *   prices (presortSettings with job.nonprofit); commercial otherwise.
  * @return {{pieces: ?number, problem: string}} pieces: how many made the
  *   presort (null when AccuZIP didn't say); problem: why staff must
  *   decide how this mails, or "" when it's good to download.
  */
-function presortOutcome(q, process) {
+function presortOutcome(q, process, opts) {
   const r = q || {};
   const up = (v) => String(v == null ? "" : v).trim().toUpperCase();
+  const wantPermit = opts && opts.nonprofit ? "NONPROFIT" : "PROFIT";
+  const rateName = (p) => p === "NONPROFIT" ? "nonprofit" :
+    p === "PROFIT" ? "commercial" : p.toLowerCase();
   const n = parseInt(String(r.total_presort_records || "")
       .replace(/,/g, ""), 10);
   const pieces = Number.isFinite(n) ? n : null;
@@ -284,6 +343,9 @@ function presortOutcome(q, process) {
   } else if (up(r.mail_pay_method) && up(r.mail_pay_method) !== "IMPRINT") {
     problem = `AccuZIP moved its postage to ${up(r.mail_pay_method)}, ` +
       "not our permit imprint";
+  } else if (up(r.mail_permit_type) && up(r.mail_permit_type) !== wantPermit) {
+    problem = `AccuZIP priced it as ${rateName(up(r.mail_permit_type))} ` +
+      `Marketing Mail, not ${rateName(wantPermit)}`;
   } else if (pieces !== null && pieces < PRESORT_MIN_PIECES) {
     problem = tooFewPieces(pieces);
   }
@@ -535,9 +597,11 @@ module.exports = {
   POSTCARD_PIECE,
   PIECE_SIZES,
   NCOA_LEFT_OUT,
+  NCOA_LEFT_OUT_FORWARDING,
   REQUIRED_SETTINGS,
   needsPresort,
   cleanPafId,
+  cleanNonprofitAuth,
   presortCsv,
   presortSettings,
   presortProcess,
