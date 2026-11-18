@@ -175,6 +175,81 @@ function cleanNonprofitAuth(v) {
 }
 
 /**
+ * A permit number as staff typed it: "#", "No." and spaces dropped,
+ * letters and digits, at most ten. "" when it can't be one. PURE.
+ * @param {*} v the number.
+ * @return {string} the number, upper case, or "".
+ */
+function cleanPermitNumber(v) {
+  const n = String(v == null ? "" : v).toUpperCase()
+      .replace(/^\s*(PERMIT)?\s*(NO\.?|NUMBER)?\s*#?/, "")
+      .replace(/[\s#-]+/g, "");
+  return /^[A-Z0-9]{1,10}$/.test(n) ? n : "";
+}
+
+/**
+ * A CLIENT's own permit, checked: the mailing pays from their permit
+ * account and their imprint, while the shop stays on the statement as the
+ * mailing agent (our Mailer ID, CRID and barcodes). A permit imprint
+ * account lives at one post office, so the mail is entered there: its
+ * ZIP replaces the shop's drop ZIP. PURE.
+ * @param {*} p {number, holderName, holderAddress, crid, dropZip,
+ *   mailerId?, phone?, nonprofitAuth?}: holderName/holderAddress are the
+ *   permit holder as USPS has them; crid is theirs (Business Customer
+ *   Gateway); nonprofitAuth when the holder is a USPS-authorized
+ *   nonprofit.
+ * @return {{permit: ?object, problem: string}} permit: the clean fields
+ *   (empty strings for options not given); problem: what's wrong, worded
+ *   for staff, or "".
+ */
+function checkClientPermit(p) {
+  const src = p && typeof p === "object" ? p : {};
+  const line = (v) => String(v == null ? "" : v).replace(/\s+/g, " ").trim();
+  const digits = (v) => String(v == null ? "" : v).replace(/\D/g, "");
+  const bad = (problem) => ({permit: null, problem});
+  const number = cleanPermitNumber(src.number);
+  if (!number) return bad("Enter the client's permit number.");
+  const holderName = line(src.holderName);
+  if (!holderName || holderName.length > 80) {
+    return bad("Enter the permit holder's name, as it's on the permit.");
+  }
+  const holderAddress = line(src.holderAddress);
+  if (!holderAddress || holderAddress.length > 200) {
+    return bad("Enter the permit holder's mailing address.");
+  }
+  const crid = digits(src.crid);
+  if (crid.length < 4 || crid.length > 15) {
+    return bad("Enter the permit holder's CRID: the digits on their " +
+      "USPS Business Customer Gateway account.");
+  }
+  const dropZip = digits(src.dropZip);
+  if (dropZip.length !== 5) {
+    return bad("Enter the 5-digit ZIP of the post office that holds the " +
+      "permit: the mail is dropped there.");
+  }
+  const mailerId = digits(src.mailerId);
+  if (mailerId && mailerId.length !== 6 && mailerId.length !== 9) {
+    return bad("A Mailer ID is 6 or 9 digits. Leave it empty if they " +
+      "don't have one.");
+  }
+  const rawPhone = digits(src.phone);
+  const phone = rawPhone.length === 11 && rawPhone[0] === "1" ?
+    rawPhone.slice(1) : rawPhone;
+  if (phone && phone.length !== 10) {
+    return bad("Enter the permit holder's phone as 10 digits, or leave " +
+      "it empty.");
+  }
+  const rawAuth = line(src.nonprofitAuth);
+  const nonprofitAuth = rawAuth ? cleanNonprofitAuth(rawAuth) : "";
+  if (rawAuth && !nonprofitAuth) {
+    return bad("A nonprofit authorization number is letters or digits, " +
+      "up to 10.");
+  }
+  return {permit: {number, holderName, holderAddress, crid, dropZip,
+    mailerId, phone, nonprofitAuth}, problem: ""};
+}
+
+/**
  * A date as AccuZIP writes it. PURE.
  * @param {Date} d the date (its UTC day).
  * @return {string} MM/DD/YYYY.
@@ -185,7 +260,8 @@ function mmddyyyy(d) {
 }
 
 /**
- * The QUOTE settings for a run on the shop's Marketing Mail permit. PURE.
+ * The QUOTE settings for a Marketing Mail run: on the shop's permit, or
+ * on a client's (job.permit). PURE.
  * @param {object} s the shop's mailing settings (REQUIRED_SETTINGS).
  * @param {object} job {piece: the product's mail piece (see
  *   POSTCARD_PIECE), pafId: the list owner's PAF id, mailingDate: Date,
@@ -196,10 +272,14 @@ function mmddyyyy(d) {
  *   print AccuZIP's standardized address fields); nonprofit: {name,
  *   authNumber, address?} prices it as Nonprofit Marketing Mail for that
  *   authorized organization, whose number goes on the postage statement.
+ *   A third option, also off unless asked for: permit (see
+ *   checkClientPermit) mails it on the CLIENT's permit, entered at the
+ *   post office that holds it; the shop stays the mailing agent.
  * @return {object} the JSON to PUT.
  * @throws {Error} naming every missing setting, or when the piece or the
  *   PAF is missing: no presort claims NCOALink without one. Also when a
- *   nonprofit mailing lacks the organization's name or a usable number.
+ *   nonprofit mailing lacks the organization's name or a usable number,
+ *   or a client permit doesn't check out.
  */
 function presortSettings(s, job) {
   const cfg = s || {};
@@ -208,6 +288,11 @@ function presortSettings(s, job) {
   if (missing.length) {
     throw new Error(`Mailing settings missing: ${missing.join(", ")}`);
   }
+  const theirs = job.permit ? checkClientPermit(job.permit) : null;
+  if (theirs && theirs.problem) {
+    throw new Error(`Client permit: ${theirs.problem}`);
+  }
+  const cp = theirs ? theirs.permit : null;
   const np = job.nonprofit || null;
   const npAuth = np ? cleanNonprofitAuth(np.authNumber) : "";
   const npName = np ? String(np.name || "").replace(/\s+/g, " ").trim() : "";
@@ -240,7 +325,8 @@ function presortSettings(s, job) {
     // meter switch.
     "force_presort_class": "1",
     "mail_pay_method_override": "1",
-    "drop_zip": digits(cfg.dropZip).slice(0, 5),
+    // A client permit is entered where it's held.
+    "drop_zip": cp ? cp.dropZip : digits(cfg.dropZip).slice(0, 5),
     "mail_piece_size": piece.size,
     "piece_height": String(piece.heightIn),
     "piece_length": String(piece.lengthIn),
@@ -258,10 +344,18 @@ function presortSettings(s, job) {
     // number (PS Form 3602-N "prepared for").
     "mail_permit_type": np ? "NONPROFIT" : "PROFIT",
     "mail_pay_method": "IMPRINT",
-    "mail_permit_number": String(cfg.permitNumber),
-    "permit_holder_name_address": String(cfg.permitHolder),
-    "permit_holder_mailer_id": digits(cfg.mailerId),
-    "permit_holder_crid": digits(cfg.crid),
+    // The permit the postage comes out of: ours, or the client's. Either
+    // way the shop prepares it, so the mailing agent and the barcodes'
+    // Mailer ID stay ours.
+    "mail_permit_number": cp ? cp.number : String(cfg.permitNumber),
+    "permit_holder_name_address": cp ?
+      `${cp.holderName}|${cp.holderAddress}` : String(cfg.permitHolder),
+    "permit_holder_mailer_id": cp ? cp.mailerId : digits(cfg.mailerId),
+    "permit_holder_crid": cp ? cp.crid : digits(cfg.crid),
+    ...(cp && cp.phone ? {"permit_holder_phone": cp.phone} : {}),
+    ...(cp && cp.nonprofitAuth ?
+      {"permit_holder_nonprofit_authorization_number": cp.nonprofitAuth} :
+      {}),
     "mailing_agent_mailer_id": digits(cfg.mailerId),
     "mailing_agent_crid": digits(cfg.crid),
     "mailing_agent_edoc_sender_crid": digits(cfg.crid),
@@ -321,6 +415,8 @@ function presortProcess(pafId) {
  * @param {string} process the process we started (presortProcess()).
  * @param {?object} opts {nonprofit: true} when we asked for nonprofit
  *   prices (presortSettings with job.nonprofit); commercial otherwise.
+ *   permitNumber: the permit we asked it to mail on (ours or the
+ *   client's), so a job prepared on another permit stops too.
  * @return {{pieces: ?number, problem: string}} pieces: how many made the
  *   presort (null when AccuZIP didn't say); problem: why staff must
  *   decide how this mails, or "" when it's good to download.
@@ -329,6 +425,7 @@ function presortOutcome(q, process, opts) {
   const r = q || {};
   const up = (v) => String(v == null ? "" : v).trim().toUpperCase();
   const wantPermit = opts && opts.nonprofit ? "NONPROFIT" : "PROFIT";
+  const wantNumber = opts ? cleanPermitNumber(opts.permitNumber) : "";
   const rateName = (p) => p === "NONPROFIT" ? "nonprofit" :
     p === "PROFIT" ? "commercial" : p.toLowerCase();
   const n = parseInt(String(r.total_presort_records || "")
@@ -346,6 +443,10 @@ function presortOutcome(q, process, opts) {
   } else if (up(r.mail_permit_type) && up(r.mail_permit_type) !== wantPermit) {
     problem = `AccuZIP priced it as ${rateName(up(r.mail_permit_type))} ` +
       `Marketing Mail, not ${rateName(wantPermit)}`;
+  } else if (wantNumber && cleanPermitNumber(r.mail_permit_number) &&
+      cleanPermitNumber(r.mail_permit_number) !== wantNumber) {
+    problem = "AccuZIP prepared it on permit " +
+      `${cleanPermitNumber(r.mail_permit_number)}, not ${wantNumber}`;
   } else if (pieces !== null && pieces < PRESORT_MIN_PIECES) {
     problem = tooFewPieces(pieces);
   }
@@ -602,6 +703,8 @@ module.exports = {
   needsPresort,
   cleanPafId,
   cleanNonprofitAuth,
+  cleanPermitNumber,
+  checkClientPermit,
   presortCsv,
   presortSettings,
   presortProcess,
