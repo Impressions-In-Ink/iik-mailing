@@ -61,6 +61,25 @@ test("a request row carries every field, mixed case, and the id", () => {
   assert.equal(CASS_BATCH_SIZE, 20);
 });
 
+test("a request row is plain ASCII: one en dash 500s the whole batch",
+    () => {
+      const r = cassRequestRow({line1: "Attn: Billing Desk \u2013 Room 2",
+        company: "O\u2019Brien \u201CCaf\u00E9\u201D", line2: "Ste\u00A04",
+        city: "Coeur d\u2019Al\u00E8ne", state: "ID",
+        zip: "83814\u20131234"}, 1);
+      assert.equal(r["AZSetQuery_iadl1"], "Attn: Billing Desk - Room 2");
+      assert.equal(r["AZSetQuery_iadl2"], "O'Brien \"Cafe\"");
+      assert.equal(r["AZSetQuery_iadl3"], "Ste 4");
+      assert.equal(r["AZSetQuery_ictyi"], "Coeur d'Alene");
+      assert.equal(r["AZSetQuery_izipc"], "83814-1234");
+      assert.equal(cassRequestRow({line1: "123\u00BD Main St \u2603"}, 2)[
+          "AZSetQuery_iadl1"], "123 1/2 Main St",
+      "anything else is dropped, never sent");
+      for (const v of Object.values(r)) {
+        assert.match(v, /^[\x20-\x7E]*$/, v);
+      }
+    });
+
 test("postCass sends the key and rows to the CASS endpoint", async () => {
   const reply = {success: true, Addr_Result: [{dadl1: "123 Main St"}]};
   const f = fakeFetch(200, reply);

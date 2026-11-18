@@ -20,6 +20,8 @@ const {
   needsPresort,
   cleanPafId,
   cleanNonprofitAuth,
+  cleanPermitNumber,
+  checkClientPermit,
   presortCsv,
   presortSettings,
   presortProcess,
@@ -175,6 +177,70 @@ test("nonprofit prices only for a named, authorized organization", () => {
   assert.equal(cleanNonprofitAuth(undefined), "");
 });
 
+/** A client's own permit, as staff typed it (made-up values). */
+const THEIR_PERMIT = Object.freeze({number: " Permit #  567 ",
+  holderName: "  Helping Hands ", holderAddress: "100 Main St,  Salem OR",
+  crid: "8765-4321", dropZip: "97301", mailerId: "", phone: "",
+  nonprofitAuth: ""});
+
+test("a client's permit pays and is entered where it's held", () => {
+  const s = presortSettings(SETTINGS, {...JOB, permit: THEIR_PERMIT});
+  assert.equal(s.mail_permit_number, "567");
+  assert.equal(s.permit_holder_name_address,
+      "Helping Hands|100 Main St, Salem OR");
+  assert.equal(s.permit_holder_crid, "87654321");
+  assert.equal(s.permit_holder_mailer_id, "", "no Mailer ID is no claim");
+  assert.equal(s.drop_zip, "97301",
+      "a permit imprint account lives at one post office");
+  assert.equal(s.mail_pay_method, "IMPRINT");
+  assert.equal("permit_holder_phone" in s, false);
+  assert.equal("permit_holder_nonprofit_authorization_number" in s, false);
+  // The shop still prepares it: the agent and the barcodes stay ours.
+  assert.equal(s.mailing_agent_crid, "12345678");
+  assert.equal(s.mailing_agent_mailer_id, "901234");
+  assert.equal(s.mailing_agent_edoc_sender_crid, "12345678");
+  assert.equal(s.imb_default_mid, "901234");
+
+  const full = presortSettings(SETTINGS, {...JOB, permit: {...THEIR_PERMIT,
+    mailerId: "902 345", phone: "1 (503) 555-0199", nonprofitAuth: "12-34"},
+  nonprofit: {name: "Helping Hands", authNumber: "1234"}});
+  assert.equal(full.permit_holder_mailer_id, "902345");
+  assert.equal(full.permit_holder_phone, "5035550199");
+  assert.equal(full.permit_holder_nonprofit_authorization_number, "1234");
+  assert.equal(full.mail_permit_type, "NONPROFIT");
+
+  const ours = presortSettings(SETTINGS, JOB);
+  assert.equal(ours.mail_permit_number, "1234", "ours unless asked");
+  assert.equal(ours.drop_zip, "97230");
+  assert.equal(ours.permit_holder_crid, "12345678");
+  assert.equal(ours.permit_holder_name_address, SETTINGS.permitHolder);
+});
+
+test("a client permit that doesn't check out never presorts", () => {
+  for (const [bad, why] of [
+    [{number: ""}, /permit number/],
+    [{number: "12345678901"}, /permit number/],
+    [{holderName: " "}, /permit holder's name/],
+    [{holderAddress: ""}, /mailing address/],
+    [{crid: "12"}, /CRID/],
+    [{dropZip: "9730"}, /5-digit ZIP/],
+    [{mailerId: "1234567"}, /Mailer ID/],
+    [{phone: "555-0100"}, /phone/],
+    [{nonprofitAuth: "12.34"}, /nonprofit authorization/],
+  ]) {
+    const p = {...THEIR_PERMIT, ...bad};
+    assert.match(checkClientPermit(p).problem, why, JSON.stringify(bad));
+    assert.throws(() => presortSettings(SETTINGS, {...JOB, permit: p}),
+        /Client permit/, JSON.stringify(bad));
+  }
+  assert.equal(checkClientPermit(null).problem,
+      "Enter the client's permit number.");
+  assert.equal(cleanPermitNumber("No. 1891"), "1891");
+  assert.equal(cleanPermitNumber("#1891"), "1891");
+  assert.equal(cleanPermitNumber("PERMIT NO 77"), "77");
+  assert.equal(cleanPermitNumber("12.5"), "");
+});
+
 test("no PAF on file, no NCOALink claim and no process", () => {
   // Not a PAF id: nothing, words, punctuation, longer than the USPS id's
   // six licensee characters (the AccuZIP account number, the whole
@@ -267,6 +333,21 @@ test("the finished job is priced at the rate we asked for", () => {
   assert.match(presortOutcome(np, "CASS-NCOA-PRESORT").problem,
       /as nonprofit Marketing Mail, not commercial/,
   "never a quiet switch to nonprofit prices either");
+});
+
+test("the finished job mails on the permit we asked for", () => {
+  const done = {task_state: "FINISHED", task_process: "CASS-NCOA-PRESORT",
+    presort_class: "STANDARD MAIL", mail_pay_method: "IMPRINT",
+    mail_permit_number: "567", total_presort_records: "500"};
+  assert.equal(presortOutcome(done, "CASS-NCOA-PRESORT",
+      {permitNumber: "#567"}).problem, "");
+  assert.equal(presortOutcome(done, "CASS-NCOA-PRESORT").problem, "",
+      "no permit asked about, none checked");
+  assert.match(presortOutcome(done, "CASS-NCOA-PRESORT",
+      {permitNumber: "1234"}).problem, /on permit 567, not 1234/);
+  assert.equal(presortOutcome({...done, mail_permit_number: ""},
+      "CASS-NCOA-PRESORT", {permitNumber: "1234"}).problem, "",
+  "a field AccuZIP leaves out doesn't stop it");
 });
 
 test("CSV parsing survives quotes, commas, CRLF and blank lines", () => {
