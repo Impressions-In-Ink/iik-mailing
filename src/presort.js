@@ -194,10 +194,11 @@ function cleanPermitNumber(v) {
  * account lives at one post office, so the mail is entered there: its
  * ZIP replaces the shop's drop ZIP. PURE.
  * @param {*} p {number, holderName, holderAddress, crid, dropZip,
- *   mailerId?, phone?, nonprofitAuth?}: holderName/holderAddress are the
- *   permit holder as USPS has them; crid is theirs (Business Customer
- *   Gateway); nonprofitAuth when the holder is a USPS-authorized
- *   nonprofit.
+ *   mailerId?, phone?, nonprofitAuth?, epsAccount?}: holderName/
+ *   holderAddress are the permit holder as USPS has them; crid is theirs
+ *   (Business Customer Gateway); nonprofitAuth when the holder is a
+ *   USPS-authorized nonprofit; epsAccount their 10-digit EPS account
+ *   number, for the statement's EPS Cust. Ref. No. (cleanEpsAccount).
  * @return {{permit: ?object, problem: string}} permit: the clean fields
  *   (empty strings for options not given); problem: what's wrong, worded
  *   for staff, or "".
@@ -245,8 +246,34 @@ function checkClientPermit(p) {
     return bad("A nonprofit authorization number is letters or digits, " +
       "up to 10.");
   }
+  const rawEps = line(src.epsAccount);
+  const epsAccount = rawEps ? cleanEpsAccount(rawEps) : "";
+  if (rawEps && !epsAccount) {
+    return bad("An EPS account number is the 10 digits on their USPS " +
+      "Enterprise Payment System account. Leave it empty if you don't " +
+      "have it.");
+  }
   return {permit: {number, holderName, holderAddress, crid, dropZip,
-    mailerId, phone, nonprofitAuth}, problem: ""};
+    mailerId, phone, nonprofitAuth, epsAccount}, problem: ""};
+}
+
+/**
+ * A USPS Enterprise Payment System (EPS) account number, as the postage
+ * statement's "EPS Cust. Ref. No." takes it (AccuZIP's
+ * `permit_holder_caps`; CAPS was EPS's forerunner): 10 digits, spaces
+ * and dashes typed in dropped. "" when it isn't one. PURE.
+ *
+ * It doesn't choose the account that pays: USPS draws permit imprint
+ * postage from the account the permit is linked to, found by the permit
+ * number and its post office. The number labels the charge on the
+ * account holder's EPS transaction history, so they can match it to the
+ * mailing.
+ * @param {*} v the number as staff typed it.
+ * @return {string} the 10 digits, or "".
+ */
+function cleanEpsAccount(v) {
+  const d = String(v == null ? "" : v).replace(/[\s-]+/g, "");
+  return /^\d{10}$/.test(d) ? d : "";
 }
 
 /**
@@ -293,6 +320,7 @@ function presortSettings(s, job) {
     throw new Error(`Client permit: ${theirs.problem}`);
   }
   const cp = theirs ? theirs.permit : null;
+  const eps = cp ? cp.epsAccount : cleanEpsAccount(cfg.epsAccount);
   const np = job.nonprofit || null;
   const npAuth = np ? cleanNonprofitAuth(np.authNumber) : "";
   const npName = np ? String(np.name || "").replace(/\s+/g, " ").trim() : "";
@@ -353,6 +381,9 @@ function presortSettings(s, job) {
     "permit_holder_mailer_id": cp ? cp.mailerId : digits(cfg.mailerId),
     "permit_holder_crid": cp ? cp.crid : digits(cfg.crid),
     ...(cp && cp.phone ? {"permit_holder_phone": cp.phone} : {}),
+    // The statement's EPS Cust. Ref. No.: the permit holder's EPS account,
+    // theirs on a client permit, the shop's (settings.epsAccount) on ours.
+    ...(eps ? {"permit_holder_caps": eps} : {}),
     ...(cp && cp.nonprofitAuth ?
       {"permit_holder_nonprofit_authorization_number": cp.nonprofitAuth} :
       {}),
@@ -705,6 +736,7 @@ module.exports = {
   cleanNonprofitAuth,
   cleanPermitNumber,
   checkClientPermit,
+  cleanEpsAccount,
   presortCsv,
   presortSettings,
   presortProcess,

@@ -442,3 +442,28 @@ test("an AccuZIP refusal never leaks its body (it echoes the key)",
         return true;
       });
     });
+
+test("the permit holder's EPS account goes in the EPS Cust. Ref. No.",
+    () => {
+      const {cleanEpsAccount} = require("../src/presort");
+      // A client permit: their number (made up).
+      const s = presortSettings(SETTINGS, {...JOB, permit: {...THEIR_PERMIT,
+        epsAccount: "100-200 3000"}});
+      assert.equal(s.permit_holder_caps, "1002003000");
+      // The shop's own permit: the shop's number, when the settings have it.
+      assert.equal(presortSettings({...SETTINGS, epsAccount: "1112223333"},
+          JOB).permit_holder_caps, "1112223333");
+      assert.equal("permit_holder_caps" in presortSettings(SETTINGS, JOB),
+          false, "no number, no field");
+      assert.equal("permit_holder_caps" in presortSettings(SETTINGS,
+          {...JOB, permit: THEIR_PERMIT}), false);
+      // On a client permit, never the shop's number.
+      assert.equal("permit_holder_caps" in presortSettings(
+          {...SETTINGS, epsAccount: "1112223333"},
+          {...JOB, permit: THEIR_PERMIT}), false);
+      assert.match(checkClientPermit({...THEIR_PERMIT, epsAccount: "12345"})
+          .problem, /10 digits/);
+      assert.equal(checkClientPermit(THEIR_PERMIT).permit.epsAccount, "");
+      assert.equal(cleanEpsAccount("ABC1234567"), "");
+      assert.equal(cleanEpsAccount(" 1234567890 "), "1234567890");
+    });
