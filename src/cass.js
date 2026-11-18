@@ -41,8 +41,38 @@ function str(v) {
     (typeof v === "number" ? String(v) : "");
 }
 
+/** Typographic characters spreadsheets slip in, as their plain twins. */
+const PLAIN_SWAPS = Object.freeze([
+  [/[\u2010-\u2015\u2212]/g, "-"], // hyphens, en/em dashes, minus
+  [/[\u2018\u2019\u201A\u201B\u2032]/g, "'"], // curly single quotes, prime
+  [/[\u201C\u201D\u201E\u201F\u2033]/g, "\""], // curly double quotes
+  [/\u2026/g, "..."], // ellipsis
+  [/[\u00A0\u2000-\u200B\u202F\u205F\u3000]/g, " "], // odd spaces
+  [/\u00BD/g, " 1/2"], // one half: 123 1/2 Main St
+]);
+
 /**
- * One address as an AccuZIP request row. PURE.
+ * A field as plain printable ASCII, the way USPS writes addresses.
+ * AccuZIP's CASS service answers HTTP 500 for the WHOLE batch when one
+ * row holds a character outside it (one en dash in an "Attn:" line
+ * stopped a 1,367-row list, 2026-11-18). Dashes and curly quotes become
+ * their plain twins, accents are dropped (e-acute to e), anything else
+ * becomes a space.
+ * PURE.
+ * @param {*} v any value.
+ * @return {string} trimmed ASCII, "" for anything that isn't text.
+ */
+function plain(v) {
+  let s = str(v);
+  if (!/[^\x20-\x7E]/.test(s)) return s;
+  for (const [re, to] of PLAIN_SWAPS) s = s.replace(re, to);
+  return s.normalize("NFKD").replace(/[\u0300-\u036F]/g, "")
+      .replace(/[^\x20-\x7E]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * One address as an AccuZIP request row, in plain ASCII (see plain).
+ * PURE.
  * @param {object} a {line1, line2?, company?, city, state, zip}.
  * @param {string|number} foreignId echoed back so results map to inputs.
  * @return {object} the request row.
@@ -50,12 +80,12 @@ function str(v) {
 function cassRequestRow(a, foreignId) {
   const rec = a || {};
   return {
-    "AZSetQuery_iadl1": str(rec.line1),
-    "AZSetQuery_iadl2": str(rec.company),
-    "AZSetQuery_iadl3": str(rec.line2),
-    "AZSetQuery_ictyi": str(rec.city),
-    "AZSetQuery_istai": str(rec.state),
-    "AZSetQuery_izipc": str(rec.zip),
+    "AZSetQuery_iadl1": plain(rec.line1),
+    "AZSetQuery_iadl2": plain(rec.company),
+    "AZSetQuery_iadl3": plain(rec.line2),
+    "AZSetQuery_ictyi": plain(rec.city),
+    "AZSetQuery_istai": plain(rec.state),
+    "AZSetQuery_izipc": plain(rec.zip),
     "AZSetQuery_icountry": "US",
     "AZSetQuery_iforeignid": String(foreignId),
     // AccuZIP answers in UPPERCASE unless asked for mixed case.
