@@ -1,0 +1,1231 @@
+<!DOCTYPE html>
+<!--
+  eddm_map.html — the USPS carrier-route map for EDDM
+  ---------------------------------------------------------------
+  SHARED: this file lives in the iik-mailing package (web/eddm_map.html)
+  and each app copies it into its own web/ folder unchanged: Impulse (an
+  iframe on the web, eddm_map_view_web.dart; a webview on a phone,
+  eddm_map_view_native.dart) and the admin app's Mail Prep (an iframe).
+  Edit it here, then copy it to both; each app has a test that fails
+  when its copy differs. It replaces AccuZIP's own hosted map page, which
+  can't be restyled, and speaks the same language so nothing on the
+  server changes (iik-mailing src/eddm.js):
+
+    - routes come from AccuZIP's ws_cr_boundaries (outline, homes,
+      businesses, income, age) for whatever the map is looking at;
+    - the picks are saved to AccuZIP's ws_save/{guid}, in the shape
+      AccuZIP's map saves, so the server's count and the order read it:
+      when the app says so ({commit: 1}, below), else on every change;
+    - every change is posted to the app as a JSON string
+      {guid, eddmData: {EDDM: [...], residential_only}}, the message
+      AccuZIP's map posts (parseEddmMapMessage in eddm_routes.dart).
+
+  Opened as eddm_map.html#<json>, json = {g: picker guid, k: Google Maps
+  browser key, dark: bool, accent: "#rrggbb"}. The fragment never reaches
+  a server or its logs. Two more, for a host with no server geocoder
+  (the admin app):
+    {at: [lat, lng, zoom]}  where a map with nothing saved opens (else
+                            the whole US); "closest" measures from there;
+    {geo: 1}                the page looks searches up itself with the
+                            Maps geocoder (the browser key must allow
+                            Geocoding) instead of asking the app.
+
+  The app can send, by postMessage on the web and by
+  window.impulseEddm(json) on a phone:
+    {cmd: "pan", lat, lng}  a search result to look at;
+    {cmd: "note", text}     a line to show (a search that found nothing);
+    {cmd: "tour"}           show the tour again;
+    {cmd: "save"}           save the picks now; answered {guid, saved: 1|0}.
+  The page asks the app, the same way it posts routes:
+    {guid, search: "97202"} look this up (the server holds the geocoding
+                            key; it answers with pan or note);
+    {guid, tour: "done"}    the tour was finished or skipped.
+  {tour: true} in the fragment starts the tour once the map is up.
+  {ask: 1} says the app answers those requests; an older phone build
+  (it loads this page from the web too) doesn't, so without it the
+  search box and the tour's search step stay hidden.
+  {commit: 1} says the app saves the picks itself ({cmd: "save"}), so
+  leaving without saving leaves AccuZIP holding what the map opened
+  with. The page then also posts what it opened with, once, as
+  {guid, eddmData, start: 1}. Without it (an older build) every change
+  is saved as it happens.
+
+  To the app: the iframe's parent on the web. On a phone the page is the
+  webview's top window, so it calls the webview's ImpulseEddm channel
+  directly (a message posted to itself would wait for a forwarding script
+  that's only added once the page has loaded).
+
+  Search is in this page, not the app, on purpose: on the web a Flutter
+  dialog drawn over this iframe can't be clicked.
+
+  No AccuZIP key is used or needed here: these endpoints are the ones
+  AccuZIP's public map page calls.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>Pick your routes</title>
+<style>
+  :root {
+    --accent: #0891b2;
+    --bg: #f5f6f9;
+    --panel: rgba(255, 255, 255, 0.96);
+    --ink: #0f172a;
+    --muted: #5b6577;
+    --line: rgba(15, 23, 42, 0.12);
+    --panel-solid: #ffffff;
+    --field: #ffffff;
+    --route-line: #334155;
+    --accent-soft: rgba(8, 145, 178, 0.18);
+    --accent-fill: rgba(8, 145, 178, 0.42);
+  }
+  :root[data-theme="dark"] {
+    --bg: #0b1220;
+    --panel: rgba(17, 24, 39, 0.94);
+    --ink: #f1f5f9;
+    --muted: #9aa6b8;
+    --line: rgba(241, 245, 249, 0.14);
+    --panel-solid: #111827;
+    --field: #0b1220;
+    --route-line: #c3cede;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.35 Inter, system-ui, -apple-system, "Segoe UI", Roboto,
+      sans-serif;
+    overflow: hidden;
+  }
+  #map { position: absolute; inset: 0; }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+    backdrop-filter: blur(6px);
+  }
+  /* ── Tools: search + quick picks ─────────────────────────────────── */
+  #tools {
+    position: absolute; top: 10px; left: 10px; right: 10px;
+    padding: 8px; max-width: 580px;
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  #search { display: flex; gap: 6px; margin: 0; }
+  #search input {
+    flex: 1; min-width: 0; font: inherit; font-size: 15px; color: var(--ink);
+    background: var(--field); border: 1px solid var(--line);
+    border-radius: 999px; padding: 8px 14px; min-height: 38px;
+    outline: none;
+  }
+  #search input:focus { border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-soft); }
+  #search input::placeholder { color: var(--muted); }
+  .row {
+    display: flex; gap: 6px; align-items: center; overflow-x: auto;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .row::-webkit-scrollbar { display: none; }
+  .row .label { color: var(--muted); font-size: 12px; font-weight: 600;
+    margin: 0 2px 0 4px; white-space: nowrap; }
+  .row .sep { flex: 0 0 1px; align-self: stretch; background: var(--line);
+    margin: 4px 2px; }
+  button.chip {
+    font: inherit; font-size: 13px; font-weight: 600; white-space: nowrap;
+    color: var(--ink); background: transparent;
+    border: 1px solid var(--line); border-radius: 999px;
+    padding: 6px 12px; min-height: 34px; cursor: pointer; flex: none;
+  }
+  button.chip:hover { border-color: var(--accent); }
+  button.chip.on, button.chip.go {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  button.chip:disabled { opacity: 0.5; cursor: default; }
+  button.chip .tick { display: none; }
+  button.chip.on .tick { display: inline; }
+
+  /* ── The card: a route's facts, or the legend ────────────────────── */
+  #card {
+    position: absolute; left: 10px; bottom: 26px; padding: 12px 14px;
+    width: min(340px, calc(100% - 20px)); display: none;
+  }
+  #card .head { display: flex; align-items: baseline; gap: 8px; }
+  #card .id { font-weight: 800; font-size: 15px; }
+  #card .where { color: var(--muted); font-size: 12px; }
+  #card .big { margin-top: 6px; display: flex; gap: 18px; }
+  #card .big div { display: flex; flex-direction: column; }
+  #card .big b { font-size: 20px; font-weight: 800; line-height: 1.1; }
+  #card .big span { color: var(--muted); font-size: 12px; }
+  #card .more { margin-top: 6px; color: var(--muted); font-size: 12px; }
+  #card .state { margin-top: 8px; font-size: 12px; font-weight: 700;
+    color: var(--accent); }
+  #card .legend { display: grid; gap: 6px; font-size: 13px; }
+  #card .legend div { display: flex; align-items: center; gap: 8px; }
+  .sw { width: 18px; height: 12px; border-radius: 3px; flex: none; }
+  .sw.picked { background: var(--accent-fill); border: 2px solid var(--accent); }
+  .sw.open { border: 1.5px solid var(--route-line); }
+  .sw.you { width: 12px; height: 12px; border-radius: 50%;
+    background: var(--ink); border: 2px solid #fff;
+    box-shadow: 0 0 0 1px var(--line); margin: 0 3px; }
+  #card .hint { color: var(--muted); font-size: 12px; margin-top: 2px; }
+
+  /* ── Delivery counts drawn on the routes ─────────────────────────── */
+  .count {
+    position: absolute; transform: translate(-50%, -50%);
+    pointer-events: none; white-space: nowrap;
+    font-size: 11px; font-weight: 800; letter-spacing: 0.01em;
+    padding: 2px 7px; border-radius: 999px;
+    background: var(--panel); color: var(--ink);
+    border: 1px solid var(--line);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  }
+  .count.on { background: var(--accent); color: #fff;
+    border-color: var(--accent); }
+  .count.you { background: var(--ink); color: var(--bg);
+    border-color: var(--ink); transform: translate(-50%, -170%); }
+
+  #note {
+    position: absolute; left: 50%; transform: translateX(-50%);
+    top: 120px; padding: 8px 14px; font-weight: 600; display: none;
+    max-width: calc(100% - 20px); text-align: center;
+  }
+  #boot {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    gap: 18px; align-items: center; justify-content: center;
+    background: var(--bg); color: var(--muted); text-align: center;
+    padding: 24px; font-weight: 600;
+  }
+  /* Route tiles lit by a wave: the app's loader, while Google Maps and the
+     saved picks load. Gone (and still) once the map starts. */
+  #boot .tiles { display: grid; grid-template-columns: repeat(4, auto);
+    gap: 5px; }
+  #boot .tiles i { display: block; height: 18px; border-radius: 5px;
+    border: 1.2px solid var(--line); background: var(--accent-soft);
+    animation: lit 1.7s ease-in-out infinite; }
+  #boot .tiles i:nth-child(4n+1) { width: 30px; }
+  #boot .tiles i:nth-child(4n+2) { width: 22px; }
+  #boot .tiles i:nth-child(4n+3) { width: 34px; }
+  #boot .tiles i:nth-child(4n) { width: 26px; }
+  #boot .tiles i:nth-child(2), #boot .tiles i:nth-child(5) {
+    animation-delay: 0.28s; }
+  #boot .tiles i:nth-child(3), #boot .tiles i:nth-child(6),
+  #boot .tiles i:nth-child(9) { animation-delay: 0.56s; }
+  #boot .tiles i:nth-child(4), #boot .tiles i:nth-child(7),
+  #boot .tiles i:nth-child(10) { animation-delay: 0.84s; }
+  #boot .tiles i:nth-child(8), #boot .tiles i:nth-child(11) {
+    animation-delay: 1.12s; }
+  #boot .tiles i:nth-child(12) { animation-delay: 1.4s; }
+  @keyframes lit {
+    0%, 55%, 100% { background: var(--accent-soft);
+      border-color: var(--line); }
+    25% { background: var(--accent); border-color: var(--accent); }
+  }
+  /* A line along the bottom of the tools while routes load. */
+  #tools .loading {
+    position: absolute; left: 14px; right: 14px; bottom: 3px; height: 2px;
+    border-radius: 2px; overflow: hidden; opacity: 0;
+    transition: opacity 0.2s;
+  }
+  #tools.busy .loading { opacity: 1; }
+  #tools .loading::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -40%;
+    width: 40%; border-radius: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent),
+      transparent);
+  }
+  #tools.busy .loading::after { animation: sweep 1.1s ease-in-out infinite; }
+  @keyframes sweep { from { left: -40%; } to { left: 100%; } }
+  @media (prefers-reduced-motion: reduce) {
+    #boot .tiles i, #tools.busy .loading::after { animation: none; }
+    #tools.busy .loading::after { left: 30%; }
+  }
+
+  /* ── The tour ────────────────────────────────────────────────────── */
+  #tour { position: absolute; inset: 0; z-index: 10; display: none; }
+  #tour .shade { position: absolute; inset: 0; }
+  #tour .hole {
+    position: absolute; border-radius: 14px;
+    box-shadow: 0 0 0 9999px rgba(8, 12, 22, 0.55),
+      0 0 0 3px var(--accent);
+    transition: left .25s ease, top .25s ease, width .25s ease,
+      height .25s ease, border-radius .25s ease;
+    pointer-events: none;
+  }
+  #tour .hole.none { width: 0; height: 0; left: 50%; top: 50%;
+    box-shadow: 0 0 0 9999px rgba(8, 12, 22, 0.55); }
+  #tour .tip {
+    position: absolute; width: min(360px, calc(100% - 24px));
+    padding: 16px 16px 12px; border-radius: 16px;
+    background: var(--panel-solid); color: var(--ink);
+    border: 1px solid var(--line); box-shadow: 0 12px 36px rgba(0,0,0,.28);
+    transition: left .25s ease, top .25s ease;
+  }
+  #tour .tip .step { font-size: 11px; font-weight: 800; color: var(--accent);
+    letter-spacing: 0.08em; text-transform: uppercase; }
+  #tour .tip h2 { margin: 4px 0 6px; font-size: 17px; line-height: 1.25; }
+  #tour .tip p { margin: 0 0 6px; color: var(--muted); font-size: 14px; }
+  #tour .tip p b { color: var(--ink); }
+  #tour .dots { display: flex; gap: 5px; margin: 10px 0 2px; }
+  #tour .dots i { width: 6px; height: 6px; border-radius: 50%;
+    background: var(--line); }
+  #tour .dots i.on { background: var(--accent); width: 16px;
+    border-radius: 3px; }
+  #tour .btns { display: flex; align-items: center; gap: 6px;
+    margin-top: 8px; }
+  #tour .btns .skip { margin-right: auto; border: none; padding-left: 4px; }
+  #tour .btns .skip:hover { color: var(--accent); }
+
+  @media (max-width: 520px) {
+    #tools { max-width: none; }
+    #card { bottom: 22px; width: calc(100% - 70px); }
+    #card .big b { font-size: 18px; }
+  }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="tools" class="panel" style="display:none">
+  <form id="search" role="search" autocomplete="off">
+    <input id="q" type="search" enterkeyhint="search"
+      aria-label="Search the map"
+      placeholder="Search a ZIP code, city or address">
+    <button id="go" class="chip go" type="submit">Search</button>
+  </form>
+  <div class="row">
+    <span id="quick" class="row" style="overflow:visible">
+      <span class="label">Closest</span>
+      <button class="chip near" type="button" data-n="500"
+        title="Pick the routes nearest you, about 500 deliveries">500</button>
+      <button class="chip near" type="button" data-n="1000">1,000</button>
+      <button class="chip near" type="button" data-n="2500">2,500</button>
+      <button class="chip near" type="button" data-n="5000">5,000</button>
+    </span>
+    <span class="sep"></span>
+    <button id="homes" class="chip" type="button"
+      title="Leave businesses out of the count"><span class="tick">✓ </span>Homes only</button>
+    <button id="clear" class="chip" type="button">Clear</button>
+  </div>
+  <div class="loading" aria-hidden="true"></div>
+</div>
+<div id="card" class="panel" aria-live="polite"></div>
+<div id="note" class="panel" role="status"></div>
+<div id="tour" role="dialog" aria-modal="true" aria-label="How the route map works">
+  <div class="shade"></div>
+  <div class="hole none"></div>
+  <div class="tip"></div>
+</div>
+<div id="boot" role="status">
+  <div class="tiles" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div>Opening the route map…</div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+
+  var HOST = 'https://cloud2.iaccutrace.com/servoy-service/rest_ws/mod_eddm';
+  var MAP_VERSION = 4;
+  var MIN_ROUTE_ZOOM = 13;   // below this a screen holds too many routes
+  var MAX_ROUTES = 200;      // the server's ceiling (eddmRoutes.js)
+  var MARKER = 'impulse';    // the server's reopen marker; not a route
+
+  // ── What the app passed ──────────────────────────────────────────────
+  var opts = {};
+  try {
+    opts = JSON.parse(decodeURIComponent(location.hash.slice(1)) || '{}');
+  } catch (_) {}
+  var guid = String(opts.g || '').toLowerCase();
+  var accent = /^#[0-9a-f]{6}$/i.test(opts.accent || '') ? opts.accent
+    : '#0891b2';
+  var dark = opts.dark === true;
+  var wantTour = opts.tour === true;
+  var canAsk = opts.ask === 1;   // the app answers {search} and {tour}
+  var geoSelf = opts.geo === 1;  // the page looks searches up itself
+  var startAt = Array.isArray(opts.at) && isFinite(Number(opts.at[0])) &&
+    isFinite(Number(opts.at[1])) ? opts.at : null;
+  var commit = opts.commit === 1;   // the app saves the picks ({cmd: save})
+  function tint(alpha) {
+    var n = parseInt(accent.slice(1), 16);
+    return 'rgba(' + (n >> 16) + ', ' + ((n >> 8) & 255) + ', ' + (n & 255) +
+      ', ' + alpha + ')';
+  }
+  var rootStyle = document.documentElement.style;
+  rootStyle.setProperty('--accent', accent);
+  rootStyle.setProperty('--accent-soft', tint(0.18));
+  rootStyle.setProperty('--accent-fill', tint(0.42));
+  if (dark) document.documentElement.setAttribute('data-theme', 'dark');
+
+  var $ = function (id) { return document.getElementById(id); };
+  /** The map can't start: say so here, and tell the app, which stops
+   *  covering the map with its loader so this shows. */
+  function fail(message) {
+    $('boot').style.display = 'flex';
+    $('boot').textContent = message;
+    if (/^[0-9a-f-]{36}$/.test(guid)) tell({guid: guid, failed: 1});
+  }
+  if (!/^[0-9a-f-]{36}$/.test(guid) || !opts.k) {
+    fail('The route map couldn\'t open. Close it and try again.');
+    return;
+  }
+
+  // ── State ────────────────────────────────────────────────────────────
+  var map = null;
+  var known = {};      // zipcrid → route facts (from boundaries or a save)
+  var picked = {};     // zipcrid → true, in pick order via `order`
+  var order = [];      // zipcrids, oldest pick first
+  var homesOnly = false;
+  var home = null;     // {lat, lng}: where "closest" measures from
+  var business = null; // {lat, lng}: the business itself (its dot)
+  var searchPin = null;
+  var counts = null;   // the overlay that draws delivery counts
+  var cardKey = null;  // the route the card shows (null = the legend)
+  var saveTimer = null;
+  var loadSeq = 0;
+
+  function num(v) {
+    var n = Number(String(v == null ? '' : v).replace(/[^0-9.-]/g, ''));
+    return isFinite(n) && n > 0 ? Math.round(n) : 0;
+  }
+  function grouped(n) {
+    return String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+  function geometryOf(raw) {
+    if (raw && typeof raw === 'object') return raw;
+    if (typeof raw !== 'string') return null;
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;',
+        '\'': '&#39;'}[c];
+    });
+  }
+  /** The middle of a GeoJSON outline's box (a saved route has no centre). */
+  function middleOf(geo) {
+    var n = -90, s = 90, e = -180, w = 180, any = false;
+    (function walk(c) {
+      if (!Array.isArray(c)) return;
+      if (typeof c[0] === 'number' && typeof c[1] === 'number') {
+        any = true;
+        if (c[1] > n) n = c[1];
+        if (c[1] < s) s = c[1];
+        if (c[0] > e) e = c[0];
+        if (c[0] < w) w = c[0];
+        return;
+      }
+      c.forEach(walk);
+    })(geo && geo.coordinates);
+    return any ? {lat: (n + s) / 2, lng: (e + w) / 2} : null;
+  }
+
+  /** A ws_cr_boundaries route as the facts this page keeps. */
+  function fromBoundary(r) {
+    var zip = String(r.zip || ''), cr = String(r.cr || '').toUpperCase();
+    var geo = geometryOf(r.st_asgeojson);
+    if (!/^[0-9]{5}$/.test(zip) || !/^[A-Z][0-9]{3}$/.test(cr) || !geo) {
+      return null;
+    }
+    return {
+      key: zip + cr, zip: zip, crrt: cr,
+      city: String(r.name || ''), state: String(r.state || ''),
+      residential: num(r.totrescnt), business: num(r.bizcnt),
+      apartments: num(r.mfdu), houses: num(r.sfdu), boxes: num(r.boxcnt),
+      avghhsize: r.avghhsize, avghhinc: r.avghhinc, medage: r.medage,
+      lat: Number(r.lat), lng: Number(r.lon), geo: geo
+    };
+  }
+
+  /** A saved EDDM row + its saved outline as the same facts. */
+  function fromSaved(row, geo) {
+    var zip = String(row.zip || ''), cr = String(row.crrt || '').toUpperCase();
+    if (!/^[0-9]{5}$/.test(zip) || !/^[A-Z][0-9]{3}$/.test(cr)) return null;
+    return {
+      key: zip + cr, zip: zip, crrt: cr,
+      city: String(row.city || ''), state: String(row.state || ''),
+      residential: num(row.residential), business: num(row.business),
+      apartments: 0, houses: 0, boxes: 0,
+      avghhsize: row.avghhsize, avghhinc: row.avghhinc, medage: row.medage,
+      lat: NaN, lng: NaN, geo: geo
+    };
+  }
+
+  function reach(r) {
+    return r.residential + (homesOnly ? 0 : r.business);
+  }
+
+  // ── Drawing ──────────────────────────────────────────────────────────
+  function draw(r) {
+    if (!r.geo || map.data.getFeatureById(r.key)) return;
+    try {
+      map.data.addGeoJson({type: 'Feature', id: r.key, geometry: r.geo,
+        properties: {sel: !!picked[r.key], hov: false}});
+    } catch (_) {}
+  }
+  function mark(key, prop, value) {
+    var f = map.data.getFeatureById(key);
+    if (f) f.setProperty(prop, value);
+  }
+  function styleOf(feature) {
+    var sel = feature.getProperty('sel'), hov = feature.getProperty('hov');
+    return {
+      fillColor: accent,
+      fillOpacity: sel ? (hov ? 0.55 : 0.42) : (hov ? 0.22 : 0.06),
+      strokeColor: sel ? accent : (dark ? '#c3cede' : '#334155'),
+      strokeOpacity: sel ? 1 : 0.85,
+      strokeWeight: sel ? 2.5 : 1.25,
+      zIndex: sel ? 2 : 1
+    };
+  }
+
+  /** The card: the route [key]'s facts, or (no key) what the map shows. */
+  function showCard(key) {
+    var r = key ? known[key] : null, card = $('card');
+    cardKey = r ? key : null;
+    if (!r) {
+      var total = 0;
+      order.forEach(function (k) { total += reach(known[k]); });
+      card.innerHTML = '<div class="legend">' +
+        '<div><span class="sw picked"></span>In your mailing' +
+          (order.length ? ': <b>' + grouped(total) + '</b> ' +
+            (homesOnly ? 'homes' : 'deliveries') : '') + '</div>' +
+        '<div><span class="sw open"></span>A mail route. Tap to add it</div>' +
+        (business ? '<div><span class="sw you"></span>Your business</div>'
+          : '') +
+        '</div><div class="hint">The number on each route is how many ' +
+        (homesOnly ? 'homes' : 'mailboxes') + ' it reaches.</div>';
+      card.style.display = 'block';
+      return;
+    }
+    var more = [];
+    if (r.apartments > 0) more.push(grouped(r.apartments) + ' apartments');
+    var inc = num(r.avghhinc);
+    if (inc > 0) more.push('income about $' + grouped(inc / 1000) + 'k');
+    var age = num(r.medage);
+    if (age > 0) more.push('median age ' + age);
+    card.innerHTML = '<div class="head"><span class="id">Route ' +
+      esc(r.crrt) + '</span><span class="where">' +
+      esc([r.zip, [r.city, r.state].filter(Boolean).join(', ')]
+        .filter(Boolean).join(' · ')) + '</span></div>' +
+      '<div class="big"><div><b>' + grouped(r.residential) +
+      '</b><span>homes</span></div><div><b>' + grouped(r.business) +
+      '</b><span>businesses' + (homesOnly ? ' (left out)' : '') +
+      '</span></div></div>' +
+      (more.length ? '<div class="more">' + esc(more.join(' · ')) + '</div>'
+        : '') +
+      '<div class="state">' + (picked[key]
+        ? '✓ In your mailing. Tap the route to take it out.'
+        : 'Tap the route to add it.') + '</div>';
+    card.style.display = 'block';
+  }
+
+  var noteTimer = null;
+  function note(text, sticky) {
+    var el = $('note');
+    clearTimeout(noteTimer);
+    if (!text) { el.style.display = 'none'; return; }
+    var tools = $('tools');
+    el.style.top = (tools.offsetTop + tools.offsetHeight + 8) + 'px';
+    el.textContent = text;
+    el.style.display = 'block';
+    if (!sticky) noteTimer = setTimeout(function () { note(''); }, 3200);
+  }
+
+  // ── Delivery counts on the routes ────────────────────────────────────
+  // One overlay holds a pill per route on screen: the deliveries it adds
+  // (accent when it's in the mailing). Every route gets one from zoom 14;
+  // at 13 only the picked ones, so the map stays readable.
+  var LABEL_ZOOM = 14;
+  function makeCounts() {
+    function Counts() { this.pills = {}; this.box = null; }
+    Counts.prototype = new google.maps.OverlayView();
+    Counts.prototype.onAdd = function () {
+      this.box = document.createElement('div');
+      this.getPanes().overlayLayer.appendChild(this.box);
+    };
+    Counts.prototype.onRemove = function () {
+      if (this.box) this.box.remove();
+      this.box = null;
+    };
+    Counts.prototype.sync = function () {
+      if (!this.box) return;
+      var zoom = map.getZoom(), bounds = map.getBounds(), keep = {};
+      var self = this;
+      if (bounds && zoom >= MIN_ROUTE_ZOOM) {
+        Object.keys(known).forEach(function (key) {
+          var r = known[key];
+          if (!picked[key] && zoom < LABEL_ZOOM) return;
+          if (!r.at) r.at = isFinite(r.lat) && isFinite(r.lng)
+            ? {lat: r.lat, lng: r.lng} : middleOf(r.geo);
+          if (!r.at || !bounds.contains(r.at)) return;
+          keep[key] = true;
+          var el = self.pills[key];
+          if (!el) {
+            el = self.pills[key] = document.createElement('div');
+            self.box.appendChild(el);
+          }
+          el.className = 'count' + (picked[key] ? ' on' : '');
+          el.textContent = (picked[key] ? '✓ ' : '') + grouped(reach(r));
+        });
+      }
+      if (business && zoom >= 11) {
+        keep.__you = true;
+        if (!this.pills.__you) {
+          var you = this.pills.__you = document.createElement('div');
+          you.className = 'count you';
+          you.textContent = 'You';
+          this.box.appendChild(you);
+        }
+      }
+      Object.keys(this.pills).forEach(function (key) {
+        if (!keep[key]) { self.pills[key].remove(); delete self.pills[key]; }
+      });
+      this.draw();
+    };
+    Counts.prototype.draw = function () {
+      var proj = this.getProjection();
+      if (!proj) return;
+      var self = this;
+      Object.keys(this.pills).forEach(function (key) {
+        var at = key === '__you' ? business : known[key] && known[key].at;
+        if (!at) return;
+        var p = proj.fromLatLngToDivPixel(new google.maps.LatLng(at));
+        self.pills[key].style.left = p.x + 'px';
+        self.pills[key].style.top = p.y + 'px';
+      });
+    };
+    var c = new Counts();
+    c.setMap(map);
+    return c;
+  }
+  function relabel() { if (counts) counts.sync(); }
+
+  // ── Picking ──────────────────────────────────────────────────────────
+  function setPicked(key, on) {
+    if (on === !!picked[key]) return true;
+    if (on) {
+      if (order.length >= MAX_ROUTES) {
+        note('That\'s the most routes one order can hold.');
+        return false;
+      }
+      picked[key] = true;
+      order.push(key);
+    } else {
+      delete picked[key];
+      order = order.filter(function (k) { return k !== key; });
+    }
+    mark(key, 'sel', on);
+    return true;
+  }
+
+  function rows() {
+    return order.map(function (key, i) {
+      var r = known[key];
+      return {id: i + 1, zip: r.zip, crrt: r.crrt, city: r.city,
+        state: r.state, residential: r.residential, business: r.business,
+        avghhsize: r.avghhsize, avghhinc: r.avghhinc, medage: r.medage};
+    });
+  }
+
+  /** What's picked, as the app reads it. */
+  function picks() {
+    return {EDDM: rows(), residential_only: homesOnly ? '1' : '0'};
+  }
+
+  /** Tell the app; save where the server reads it unless the app saves. */
+  function changed() {
+    tell({guid: guid, eddmData: picks()});
+    if (!commit) {
+      clearTimeout(saveTimer);
+      saveTimer = setTimeout(save, 350);
+    }
+    relabel();
+    showCard(cardKey);
+  }
+
+  /** Save the picks to AccuZIP. With `done`, it hears whether they took
+   *  (the app's save); without, a failure is shown on the map. */
+  function save(done) {
+    var c = map.getCenter();
+    var body = {
+      residential_only: homesOnly ? '1' : '0',
+      download_type: '',
+      EDDM: rows(),
+      EDDM_MAP_INFO: {
+        map_position: [c.lat(), c.lng(), map.getZoom()],
+        routes_detail: order.map(function (key, i) {
+          return {id: i + 1, zipcrid: key, geoJson: known[key].geo};
+        }),
+        impulse: {residentialOnly: homesOnly,
+          home: home ? [home.lat, home.lng] : null,
+          business: business ? [business.lat, business.lng] : null}
+      }
+    };
+    fetch(HOST + '/ws_save/' + guid, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)
+    }).then(function (resp) {
+      if (!resp.ok) throw new Error('save');
+      return resp.json().catch(function () { return null; });
+    }).then(function (json) {
+      if (json && json.success === false) throw new Error('save');
+      if (done) done(true);
+    }).catch(function () {
+      if (done) done(false);
+      else note('Couldn\'t save that pick. Check your connection.');
+    });
+  }
+
+  // ── Routes for what the map is looking at ────────────────────────────
+  function boundsPath(n, e, s, w) {
+    var pt = function (x, y) { return encodeURIComponent(x + ' ' + y); };
+    return [pt(w, n), pt(e, n), pt(e, s), pt(w, s), MAP_VERSION].join('/');
+  }
+  /** Routes loading: the line under the tools, once a load takes a moment
+   *  (a quick one never flickers it). */
+  var pending = 0, busyTimer = null;
+  function busy(delta) {
+    pending = Math.max(0, pending + delta);
+    clearTimeout(busyTimer);
+    if (pending === 0) {
+      $('tools').classList.remove('busy');
+    } else {
+      busyTimer = setTimeout(function () {
+        $('tools').classList.add('busy');
+      }, 250);
+    }
+  }
+
+  function fetchRoutes(n, e, s, w) {
+    busy(1);
+    return fetch(HOST + '/ws_cr_boundaries/' + boundsPath(n, e, s, w))
+      .then(function (resp) { return resp.ok ? resp.json() : null; })
+      .then(function (data) {
+        var list = data && data.data && data.data.routes;
+        var out = [];
+        (Array.isArray(list) ? list : []).forEach(function (raw) {
+          var r = fromBoundary(raw);
+          if (!r) return;
+          // Boundary facts are fuller than a saved row's: keep them.
+          known[r.key] = r;
+          draw(r);
+          out.push(r);
+        });
+        relabel();
+        return out;
+      })
+      .catch(function () { return []; })
+      .then(function (out) { busy(-1); return out; });
+  }
+
+  /** Runs once, when the first routes are on the map (see start). */
+  var firstDrawn = null;
+  function drawnOnce() {
+    var f = firstDrawn;
+    firstDrawn = null;
+    if (f) f();
+  }
+
+  function loadView() {
+    relabel();
+    if (map.getZoom() < MIN_ROUTE_ZOOM) {
+      note('Zoom in to see the mail routes.', true);
+      drawnOnce();
+      return;
+    }
+    var b = map.getBounds();
+    if (!b) return;
+    var seq = ++loadSeq;
+    var ne = b.getNorthEast(), sw = b.getSouthWest();
+    fetchRoutes(ne.lat(), ne.lng(), sw.lat(), sw.lng()).then(function () {
+      if (seq === loadSeq) note('');
+      drawnOnce();
+    });
+  }
+
+  /** Pick the routes nearest `home` until they reach about n deliveries. */
+  function pickClosest(n) {
+    var at = home || {lat: map.getCenter().lat(), lng: map.getCenter().lng()};
+    var span = n > 2500 ? 0.07 : n > 1000 ? 0.045 : 0.03;
+    document.querySelectorAll('.near').forEach(function (b) {
+      b.disabled = true;
+    });
+    note('Finding the closest ' + grouped(n) + '…', true);
+    fetchRoutes(at.lat + span, at.lng + span * 1.4, at.lat - span,
+      at.lng - span * 1.4).then(function (found) {
+      document.querySelectorAll('.near').forEach(function (b) {
+        b.disabled = false;
+      });
+      var near = found.filter(function (r) { return reach(r) > 0; })
+        .sort(function (a, b) {
+          var da = Math.pow(a.lat - at.lat, 2) + Math.pow(a.lng - at.lng, 2);
+          var db = Math.pow(b.lat - at.lat, 2) + Math.pow(b.lng - at.lng, 2);
+          return da - db;
+        });
+      if (near.length === 0) {
+        note('No mail routes found around here.');
+        return;
+      }
+      order.slice().forEach(function (k) { setPicked(k, false); });
+      var total = 0, box = new google.maps.LatLngBounds();
+      for (var i = 0; i < near.length && total < n; i++) {
+        var adds = reach(near[i]);
+        // Stop short when the next route would overshoot by more than
+        // stopping here undershoots (but always take the first).
+        if (total > 0 && total + adds - n > n - total) break;
+        if (!setPicked(near[i].key, true)) break;
+        total += adds;
+        box.extend({lat: near[i].lat, lng: near[i].lng});
+      }
+      box.extend(at);
+      map.fitBounds(box, 80);
+      // The box is of route centres, so the fit sits a little too close.
+      google.maps.event.addListenerOnce(map, 'idle', function () {
+        if (map.getZoom() > 15) map.setZoom(15);
+      });
+      note(grouped(total) + ' deliveries on ' + order.length + ' routes.');
+      changed();
+    });
+  }
+
+  // ── Start ────────────────────────────────────────────────────────────
+  var LIGHT = [
+    {featureType: 'poi', stylers: [{visibility: 'off'}]},
+    {featureType: 'transit', stylers: [{visibility: 'off'}]},
+    {elementType: 'geometry', stylers: [{saturation: -55}, {lightness: 8}]},
+    {featureType: 'road', elementType: 'labels.icon',
+      stylers: [{visibility: 'off'}]},
+    {featureType: 'water', elementType: 'geometry',
+      stylers: [{color: '#cfe3f1'}]}
+  ];
+  var DARK = [
+    {elementType: 'geometry', stylers: [{color: '#131c2b'}]},
+    {elementType: 'labels.text.fill', stylers: [{color: '#9aa6b8'}]},
+    {elementType: 'labels.text.stroke', stylers: [{color: '#0b1220'}]},
+    {featureType: 'poi', stylers: [{visibility: 'off'}]},
+    {featureType: 'transit', stylers: [{visibility: 'off'}]},
+    {featureType: 'road', elementType: 'geometry',
+      stylers: [{color: '#243044'}]},
+    {featureType: 'road', elementType: 'labels.icon',
+      stylers: [{visibility: 'off'}]},
+    {featureType: 'water', elementType: 'geometry',
+      stylers: [{color: '#0a1626'}]}
+  ];
+
+  function start(saved) {
+    var d = (saved && saved.data) || {};
+    var info = (d.map_info && typeof d.map_info === 'object') ? d.map_info
+      : {};
+    var pos = Array.isArray(info.map_position) ? info.map_position : [];
+    var mine = (info.impulse && typeof info.impulse === 'object')
+      ? info.impulse : {};
+    var hasPos = isFinite(Number(pos[0])) && isFinite(Number(pos[1])) &&
+      pos.length >= 2;
+    var center = hasPos ? {lat: Number(pos[0]), lng: Number(pos[1])}
+      : startAt ? {lat: Number(startAt[0]), lng: Number(startAt[1])}
+      : {lat: 39.5, lng: -98.35};
+    function point(a) {
+      return Array.isArray(a) && isFinite(Number(a[0])) &&
+        isFinite(Number(a[1])) ? {lat: Number(a[0]), lng: Number(a[1])}
+        : null;
+    }
+    home = point(mine.home) || (hasPos || startAt ? center : null);
+    // Before `business` was saved, `home` was always the business.
+    business = point(mine.business) || point(mine.home) ||
+      (hasPos ? center : null);
+    homesOnly = mine.residentialOnly === true ||
+      String(d.residential_only || '') === '1';
+
+    map = new google.maps.Map($('map'), {
+      center: center,
+      zoom: hasPos ? (Number(pos[2]) > 0 ? Number(pos[2]) : 15)
+        : startAt ? (Number(startAt[2]) > 0 ? Number(startAt[2]) : 13) : 4,
+      styles: dark ? DARK : LIGHT,
+      backgroundColor: dark ? '#0b1220' : '#f5f6f9',
+      disableDefaultUI: true,
+      zoomControl: true,
+      clickableIcons: false,
+      gestureHandling: 'greedy'
+    });
+    map.data.setStyle(styleOf);
+
+    // The routes this map already holds (the server starts a new map on
+    // the business's own route; a reopened map has the earlier picks).
+    var geoByKey = {};
+    (Array.isArray(info.routes_detail) ? info.routes_detail : [])
+      .forEach(function (x) {
+        if (x && x.zipcrid && x.zipcrid !== MARKER) {
+          geoByKey[String(x.zipcrid)] = geometryOf(x.geoJson);
+        }
+      });
+    (Array.isArray(d.routes) ? d.routes : []).forEach(function (row) {
+      var r = fromSaved(row, null);
+      if (!r || picked[r.key]) return;
+      r.geo = geoByKey[r.key] || null;
+      known[r.key] = r;
+      picked[r.key] = true;
+      order.push(r.key);
+      draw(r);
+    });
+
+    if (business) {
+      new google.maps.Marker({map: map, position: business, clickable: false,
+        title: 'Your business', zIndex: 5,
+        icon: {path: google.maps.SymbolPath.CIRCLE, scale: 7,
+          fillColor: dark ? '#f1f5f9' : '#0f172a', fillOpacity: 1,
+          strokeColor: dark ? '#0b1220' : '#fff', strokeWeight: 2}});
+    }
+    counts = makeCounts();
+
+    // Hover shows a route's facts (a mouse); a tap picks it and shows
+    // them (a finger). Leaving the routes, or tapping the bare map, goes
+    // back to the legend.
+    var unhover = null;
+    map.data.addListener('click', function (e) {
+      var key = e.feature.getId();
+      if (!known[key]) return;
+      if (setPicked(key, !picked[key])) changed();
+      showCard(key);
+    });
+    map.data.addListener('mouseover', function (e) {
+      clearTimeout(unhover);
+      e.feature.setProperty('hov', true);
+      showCard(e.feature.getId());
+    });
+    map.data.addListener('mouseout', function (e) {
+      e.feature.setProperty('hov', false);
+      clearTimeout(unhover);
+      unhover = setTimeout(function () { showCard(null); }, 700);
+    });
+    map.addListener('click', function () { showCard(null); });
+    var idle = null;
+    map.addListener('idle', function () {
+      clearTimeout(idle);
+      idle = setTimeout(loadView, 250);
+    });
+
+    $('homes').classList.toggle('on', homesOnly);
+    $('homes').addEventListener('click', function () {
+      homesOnly = !homesOnly;
+      $('homes').classList.toggle('on', homesOnly);
+      note(homesOnly ? 'Homes only: businesses are left out.'
+        : 'Every home and business on your routes.');
+      changed();
+    });
+    $('clear').addEventListener('click', function () {
+      if (order.length === 0) return;
+      order.slice().forEach(function (k) { setPicked(k, false); });
+      cardKey = null;
+      changed();
+    });
+    document.querySelectorAll('.near').forEach(function (b) {
+      b.addEventListener('click', function () {
+        pickClosest(Number(b.getAttribute('data-n')));
+      });
+    });
+    $('search').addEventListener('submit', function (e) {
+      e.preventDefault();
+      var q = $('q').value.trim();
+      if (!q) { $('q').focus(); return; }
+      $('q').blur();   // a phone's keyboard closes
+      $('go').disabled = true;
+      note('Looking for “' + q + '”…', true);
+      if (geoSelf) { lookUp(q); return; }
+      ask({search: q});
+      // The app answers with pan or note; never leave the button stuck.
+      setTimeout(function () { $('go').disabled = false; }, 8000);
+    });
+
+    if (!canAsk && !geoSelf) $('search').style.display = 'none';
+    $('tools').style.display = 'flex';
+    $('boot').style.display = 'none';
+    showCard(null);
+    if (!hasPos && !startAt) {
+      note('Search for your area to see its mail routes.', true);
+    }
+    // Said once the first routes are drawn, so the app's loader lifts off
+    // a finished map (or after a few seconds, whatever is still loading).
+    firstDrawn = function () {
+      // The app shows what's picked from the first moment, not the first
+      // tap. An app that saves the picks itself always hears what the map
+      // opened with: leaving without saving goes back to exactly that.
+      if (commit) {
+        tell({guid: guid, eddmData: picks(), start: 1});
+      } else if (order.length > 0) {
+        tell({guid: guid, eddmData: picks()});
+      }
+      if (wantTour) setTimeout(function () { tour.start(); }, 400);
+    };
+    setTimeout(drawnOnce, 5000);
+  }
+
+  // ── Talking to the app ───────────────────────────────────────────────
+  /** A message for the app: the iframe's parent on the web; on a phone
+   *  (the page is the webview's top window) its channel, called directly. */
+  function tell(msg) {
+    var json = JSON.stringify(msg);
+    try {
+      var channel = window.ImpulseEddm;
+      if (window.parent === window && channel &&
+          typeof channel.postMessage === 'function') {
+        channel.postMessage(json);
+      } else {
+        window.parent.postMessage(json, location.origin);
+      }
+    } catch (_) {}
+  }
+
+  /** A search, looked up here ({geo: 1}): answered the way the app
+   *  answers one, with a pan or a note. */
+  function lookUp(q) {
+    try {
+      new google.maps.Geocoder().geocode(
+          {address: q, componentRestrictions: {country: 'US'}},
+          function (results, status) {
+            var hit = status === 'OK' && results && results[0];
+            if (hit) {
+              var at = hit.geometry.location;
+              command({cmd: 'pan', lat: at.lat(), lng: at.lng()});
+            } else {
+              command({cmd: 'note', text: 'Nothing found for “' + q +
+                '”. Try a ZIP code or a city.'});
+            }
+          });
+    } catch (_) {
+      command({cmd: 'note', text: 'Search isn\'t working right now.'});
+    }
+  }
+
+  /** Ask the app for something ({search} or {tour: "done"}). */
+  function ask(fields) {
+    var msg = {guid: guid};
+    Object.keys(fields).forEach(function (k) { msg[k] = fields[k]; });
+    tell(msg);
+  }
+
+  function command(raw) {
+    var c = null;
+    try { c = typeof raw === 'string' ? JSON.parse(raw) : raw; } catch (_) {}
+    if (!c || !map) return;
+    if (c.cmd === 'tour') { tour.start(); return; }
+    if (c.cmd === 'save') {
+      clearTimeout(saveTimer);
+      save(function (ok) { tell({guid: guid, saved: ok ? 1 : 0}); });
+      return;
+    }
+    if (c.cmd === 'note' && typeof c.text === 'string') {
+      $('go').disabled = false;
+      note(c.text.slice(0, 200));
+      return;
+    }
+    if (c.cmd !== 'pan') return;
+    var lat = Number(c.lat), lng = Number(c.lng);
+    if (!isFinite(lat) || !isFinite(lng)) return;
+    $('go').disabled = false;
+    note('');
+    // "Closest" now measures from here: that's the area they asked for.
+    home = {lat: lat, lng: lng};
+    if (!searchPin) {
+      searchPin = new google.maps.Marker({map: map, clickable: false,
+        title: 'Your search', zIndex: 4,
+        icon: {path: google.maps.SymbolPath.CIRCLE, scale: 9,
+          fillColor: accent, fillOpacity: 0.25,
+          strokeColor: accent, strokeWeight: 3}});
+    }
+    searchPin.setPosition(home);
+    map.setCenter(home);
+    map.setZoom(15);
+  }
+  window.impulseEddm = command;
+  window.addEventListener('message', function (e) {
+    if (e.origin !== location.origin || e.source === window) return;
+    command(e.data);
+  });
+
+  // ── The tour ─────────────────────────────────────────────────────────
+  // First visit (the app passes tour: true) or the app bar's help button.
+  // A light on each part of the map, a card beside it. Finishing or
+  // skipping tells the app, which remembers it for this person.
+  var tour = (function () {
+    var STEPS = [
+      {title: 'Mail every door near you',
+        body: '<p>This is a map of <b>USPS mail routes</b>. Each outlined ' +
+          'shape is one mail carrier\'s daily route.</p><p>Pick routes and ' +
+          'we print your postcards. The post office delivers one to ' +
+          '<b>every mailbox</b> on them. No mailing list to buy, and the ' +
+          'postage costs less than a stamp.</p>'},
+      {target: 'you', title: 'Tap a route to add it',
+        body: '<p>The map starts on your business. Tap any route to put ' +
+          'it in your mailing; tap it again to take it out.</p><p>The ' +
+          'number on a route is <b>how many mailboxes</b> it reaches. ' +
+          'Shaded ones are in your mailing.</p>',
+        alt: '<p>Search for your area, then tap any route to put it in ' +
+          'your mailing; tap it again to take it out.</p><p>The number ' +
+          'on a route is <b>how many mailboxes</b> it reaches. Shaded ' +
+          'ones are in your mailing.</p>'},
+      {target: 'quick', title: 'In a hurry? Pick by size',
+        body: '<p>Choose about how many postcards to send. We pick the ' +
+          'routes <b>closest to you</b> until we reach it.</p>'},
+      {target: 'homes', title: 'Just households?',
+        body: '<p><b>Homes only</b> leaves businesses out. Good for offers ' +
+          'meant for homeowners.</p>'},
+      {target: 'search', title: 'Mail somewhere else',
+        body: '<p>Search a ZIP code, a city or an address to pick routes ' +
+          'there instead, like a neighborhood you want more work in.</p>'},
+      {target: 'card', title: 'Know before you pick',
+        body: '<p>Point at or tap a route to see its homes, businesses ' +
+          'and the people who live there.</p><p>When it looks right, ' +
+          'press <b>Use these routes</b> at the top. Your total and ' +
+          'postage show there too.</p>', last: true}
+    ];
+    var at = 0, open = false;
+    var el = $('tour'), hole = el.querySelector('.hole'),
+      tip = el.querySelector('.tip');
+
+    /** The rect to light for a step, in page pixels, or null. */
+    function rectOf(step) {
+      if (step.target === 'you') {
+        var proj = counts && counts.getProjection();
+        var spot = business || home;
+        if (!proj || !spot) return null;
+        var p = proj.fromLatLngToContainerPixel(new google.maps.LatLng(spot));
+        if (!p) return null;
+        return {left: p.x - 70, top: p.y - 70, width: 140, height: 140,
+          round: true};
+      }
+      var t = $(step.target);
+      if (!t || t.offsetParent === null) return null;
+      var b = t.getBoundingClientRect();
+      return {left: b.left - 6, top: b.top - 6, width: b.width + 12,
+        height: b.height + 12};
+    }
+
+    function render() {
+      var step = STEPS[at];
+      var r = rectOf(step);
+      if (r) {
+        hole.className = 'hole';
+        hole.style.left = r.left + 'px';
+        hole.style.top = r.top + 'px';
+        hole.style.width = r.width + 'px';
+        hole.style.height = r.height + 'px';
+        hole.style.borderRadius = r.round ? '50%' : '14px';
+      } else {
+        hole.className = 'hole none';
+        hole.removeAttribute('style');
+      }
+      var dots = STEPS.map(function (_, i) {
+        return '<i class="' + (i === at ? 'on' : '') + '"></i>';
+      }).join('');
+      tip.innerHTML = '<div class="step">Route map · ' + (at + 1) + ' of ' +
+        STEPS.length + '</div><h2>' + step.title + '</h2>' +
+        (step.alt && !business ? step.alt : step.body) +
+        '<div class="dots">' + dots + '</div><div class="btns">' +
+        (step.last ? '<span class="skip"></span>'
+          : '<button class="chip skip" data-a="skip" type="button">' +
+            'Skip tour</button>') +
+        (at > 0 ? '<button class="chip" data-a="back" type="button">' +
+          'Back</button>' : '') +
+        '<button class="chip go" data-a="next" type="button">' +
+        (step.last ? 'Start picking' : at === 0 ? 'Show me' : 'Next') +
+        '</button></div>';
+      place(r);
+      var go = tip.querySelector('[data-a="next"]');
+      if (go) go.focus({preventScroll: true});
+    }
+
+    /** The card goes beside the light: below it, above it, or centred. */
+    function place(r) {
+      var W = window.innerWidth, H = window.innerHeight;
+      var w = tip.offsetWidth, h = tip.offsetHeight, gap = 14;
+      var left, top;
+      if (!r) {
+        left = (W - w) / 2;
+        top = (H - h) / 2;
+      } else {
+        left = Math.min(Math.max(12, r.left + r.width / 2 - w / 2),
+          W - w - 12);
+        if (r.top + r.height + gap + h <= H - 12) {
+          top = r.top + r.height + gap;
+        } else if (r.top - gap - h >= 12) {
+          top = r.top - gap - h;
+        } else {
+          top = Math.max(12, H - h - 12);
+        }
+      }
+      tip.style.left = Math.round(left) + 'px';
+      tip.style.top = Math.round(top) + 'px';
+    }
+
+    function close() {
+      if (!open) return;
+      open = false;
+      el.style.display = 'none';
+      ask({tour: 'done'});
+    }
+
+    function go(i) {
+      if (i < 0) return;
+      if (i >= STEPS.length) { close(); return; }
+      at = i;
+      render();
+    }
+
+    tip.addEventListener('click', function (e) {
+      var a = e.target && e.target.getAttribute &&
+        e.target.getAttribute('data-a');
+      if (a === 'skip') close();
+      else if (a === 'back') go(at - 1);
+      else if (a === 'next') go(at + 1);
+    });
+    document.addEventListener('keydown', function (e) {
+      if (!open) return;
+      if (e.key === 'Escape') close();
+      else if (e.key === 'ArrowRight') go(at + 1);
+      else if (e.key === 'ArrowLeft') go(at - 1);
+    });
+    window.addEventListener('resize', function () { if (open) render(); });
+
+    return {
+      start: function () {
+        if (!map) return;
+        open = true;
+        at = 0;
+        el.style.display = 'block';
+        // Keep the business in view for the "tap a route" step.
+        if (business && !map.getBounds().contains(business)) {
+          map.panTo(business);
+        }
+        render();
+      }
+    };
+  })();
+
+  // ── Load: the saved picks and Google Maps, then start ────────────────
+  var savedState = null, mapsReady = false, savedReady = false;
+  function maybeStart() {
+    if (mapsReady && savedReady) start(savedState);
+  }
+  window.__eddmMapsReady = function () { mapsReady = true; maybeStart(); };
+  window.gm_authFailure = function () {
+    fail('The map couldn\'t load. Close it and try again.');
+  };
+  fetch(HOST + '/ws_save/' + guid)
+    .then(function (resp) { return resp.ok ? resp.json() : null; })
+    .catch(function () { return null; })
+    .then(function (json) { savedState = json; savedReady = true;
+      maybeStart(); });
+  var s = document.createElement('script');
+  s.src = 'https://maps.googleapis.com/maps/api/js?v=weekly&loading=async' +
+    '&callback=__eddmMapsReady&key=' + encodeURIComponent(opts.k);
+  s.async = true;
+  s.onerror = function () {
+    fail('The map couldn\'t load. Check your connection and try again.');
+  };
+  document.head.appendChild(s);
+})();
+</script>
+</body>
+</html>

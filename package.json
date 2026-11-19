@@ -1,11 +1,12 @@
 {
   "name": "iik-mailing",
-  "version": "1.3.0",
-  "description": "AccuZIP address checking (CASS), its grader, and the USPS Marketing Mail presort. Shared by two separately deployed backends so an address one app calls deliverable is never one the other refuses.",
+  "version": "1.4.0",
+  "description": "AccuZIP address checking (CASS), its grader, the USPS Marketing Mail presort, and EDDM: carrier routes picked on a map and their presort. Shared by two separately deployed backends so an address one app calls deliverable is never one the other refuses.",
   "main": "index.js",
   "files": [
     "index.js",
-    "src/"
+    "src/",
+    "web/"
   ],
   "scripts": {
     "test": "node --test",
