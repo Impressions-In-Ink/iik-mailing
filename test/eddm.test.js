@@ -129,9 +129,10 @@ test("the map's routes: bad rows dropped, repeats once", () => {
 test("the quote: plain amounts only, AccuZIP's household counts", () => {
   const q = parseQuote({success: true, Total_Residential: "1,572",
     Total_Possible: "1,624", Estimated_Postage_Standard_Flat: "$502",
+    Estimated_Postage_Standard_Nonprofit_Flat: "$352",
     Standard_Flat: "$-,502"});
   assert.deepEqual(q, {ready: true, residential: 1572, possible: 1624,
-    permitPostageCents: 50200});
+    permitPostageCents: 50200, nonprofitPostageCents: 35200});
   assert.equal(parseQuote({success: false}).ready, false);
   assert.equal(parseQuote({success: true,
     Estimated_Postage_Standard_Flat: "$-,502"}).permitPostageCents, 0);
@@ -295,7 +296,7 @@ test("a recount is reused only while the routes are the same", async () => {
   assert.equal(recounts, 1);
   assert.deepEqual(first.counts, {routeKeys: ["97202C023", "97202C025"],
     residentialOnly: false, residential: 1572, possible: 1624,
-    permitPostageCents: 50200});
+    permitPostageCents: 50200, nonprofitPostageCents: 0});
 
   // Same routes in another order: reused, no recount.
   const again = await readPick({guid: GUID, residentialOnly: false,

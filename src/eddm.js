@@ -410,7 +410,9 @@ function parseSaved(json) {
  * own postage estimate at permit (BMEU) rates. PURE.
  * @param {*} json GET QUOTE/true's body.
  * @return {?{ready: boolean, residential: number, possible: number,
- *   permitPostageCents: number}} the counts, or null for no body.
+ *   permitPostageCents: number, nonprofitPostageCents: number}} the
+ *   counts (both estimates at permit rates: commercial and nonprofit
+ *   Marketing Mail), or null for no body.
  */
 function parseQuote(json) {
   if (!json || typeof json !== "object") return null;
@@ -425,6 +427,8 @@ function parseQuote(json) {
     residential: countOf(json.Total_Residential),
     possible: countOf(json.Total_Possible),
     permitPostageCents: dollars(json.Estimated_Postage_Standard_Flat),
+    nonprofitPostageCents:
+      dollars(json.Estimated_Postage_Standard_Nonprofit_Flat),
   };
 }
 
@@ -457,7 +461,8 @@ function eddmPostageCents(households) {
  *   parseSaved's result (with residentialOnly from the app).
  * @param {?object} quote parseQuote's result.
  * @return {object} {routes, routeCount, residentialOnly, residential,
- *   business, households, postageCents, permitPostageCents}.
+ *   business, households, postageCents, permitPostageCents,
+ *   nonprofitPostageCents}.
  */
 function summarizePick(picked, quote) {
   const routes = (picked && picked.routes) || [];
@@ -479,6 +484,8 @@ function summarizePick(picked, quote) {
     postageCents: eddmPostageCents(households),
     permitPostageCents: counted && !residentialOnly ?
       quote.permitPostageCents : 0,
+    nonprofitPostageCents: counted && !residentialOnly ?
+      countOf(quote.nonprofitPostageCents) : 0,
   };
 }
 
@@ -539,7 +546,9 @@ async function readPick({guid, residentialOnly, fetchFn, known = null,
     return {...summarizePick(picked, {ready: true,
       residential: countOf(known.residential),
       possible: countOf(known.possible),
-      permitPostageCents: countOf(known.permitPostageCents)}), counts};
+      permitPostageCents: countOf(known.permitPostageCents),
+      nonprofitPostageCents: countOf(known.nonprofitPostageCents)}),
+    counts};
   }
   let quote = null;
   for (let i = 0; i < QUOTE_TRIES; i++) {
@@ -558,6 +567,7 @@ async function readPick({guid, residentialOnly, fetchFn, known = null,
     residential: quote.residential,
     possible: quote.possible,
     permitPostageCents: quote.permitPostageCents,
+    nonprofitPostageCents: quote.nonprofitPostageCents,
   }};
 }
 
