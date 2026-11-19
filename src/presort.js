@@ -79,6 +79,34 @@ const POSTCARD_PIECE = Object.freeze({
  * only, so it never appears here. */
 const PIECE_SIZES = Object.freeze(["LETTER", "FLAT"]);
 
+/**
+ * AccuZIP's process for an EDDM run (its EDDM Postman collection). A run
+ * picked on the route map has no names or addresses, only carrier routes,
+ * so CASS, NCOALink and the duplicate check find nothing to change; the
+ * presort makes the carrier-route bundles, the postage statement and the
+ * Mail.dat. AccuZIP documents it on the older path without v2_0
+ * (AccuzipCloud.processEddm).
+ */
+const EDDM_PROCESS = "CASS-NCOA-DUPS_01-PRESORT";
+
+/** What AccuZIP calls an EDDM presort (QUOTE presort_class). */
+const EDDM_CLASS = "STANDARD MAIL (EDDM)";
+
+/**
+ * USPS EDDM pieces are flats: longer than 11.5 in, OR taller than 6.125
+ * in, OR thicker than 0.25 in, and no bigger than 15 x 12 x 0.75 in
+ * (DMM 140, Every Door Direct Mail). Inches and ounces.
+ */
+const EDDM_FLAT = Object.freeze({
+  overLengthIn: 11.5,
+  overHeightIn: 6.125,
+  overThicknessIn: 0.25,
+  maxLengthIn: 15,
+  maxHeightIn: 12,
+  maxThicknessIn: 0.75,
+  maxWeightOz: 16,
+});
+
 /** NCOALink results left out of the run (AccuZIP's filter_ncoa_NN): moved
  * with a new address (01), new address unconfirmed (02), moved left no
  * address (03), moved abroad (04), moved to a new state (05), and moved
@@ -309,6 +337,62 @@ function mmddyyyy(d) {
  *   or a client permit doesn't check out.
  */
 function presortSettings(s, job) {
+  return buildSettings(s, job, false);
+}
+
+/**
+ * Why a piece can't go EDDM, or "" when it can. PURE.
+ * @param {object} piece {size, lengthIn, heightIn, thicknessIn, weightOz}.
+ * @return {string} the reason, in words staff read.
+ */
+function eddmPieceProblem(piece) {
+  const p = piece || {};
+  const L = Number(p.lengthIn);
+  const H = Number(p.heightIn);
+  const T = Number(p.thicknessIn);
+  const W = Number(p.weightOz);
+  if (![L, H, T, W].every((n) => n > 0)) {
+    return "Give the piece's size, thickness and weight";
+  }
+  const f = EDDM_FLAT;
+  if (!(L > f.overLengthIn || H > f.overHeightIn || T > f.overThicknessIn)) {
+    return `EDDM pieces are flats: longer than ${f.overLengthIn} in, ` +
+      `taller than ${f.overHeightIn} in, or thicker than ` +
+      `${f.overThicknessIn} in`;
+  }
+  if (L > f.maxLengthIn || H > f.maxHeightIn || T > f.maxThicknessIn) {
+    return `EDDM pieces are at most ${f.maxLengthIn} x ${f.maxHeightIn} ` +
+      `in and ${f.maxThicknessIn} in thick`;
+  }
+  if (W > f.maxWeightOz) return `EDDM pieces weigh under 1 lb`;
+  return "";
+}
+
+/**
+ * The QUOTE settings for an EDDM run picked on the route map (eddm.js):
+ * the same permit, rate, mailing agent and paperwork as a list run
+ * (presortSettings), with AccuZIP's EDDM class, carrier-route prices, a
+ * flat piece, and no Move Update: an EDDM piece carries no name or
+ * address, so there is no list owner, no PAF and no NCOALink. PURE.
+ * @param {object} s the shop's mailing settings (REQUIRED_SETTINGS).
+ * @param {object} job as presortSettings, minus pafId / moveUpdateDate /
+ *   forwardMovers; piece must pass eddmPieceProblem.
+ * @return {object} the JSON to PUT.
+ * @throws {Error} as presortSettings, or naming what's wrong with the
+ *   piece.
+ */
+function eddmPresortSettings(s, job) {
+  return buildSettings(s, job, true);
+}
+
+/**
+ * presortSettings and eddmPresortSettings. PURE.
+ * @param {object} s the shop's mailing settings.
+ * @param {object} job the run.
+ * @param {boolean} eddm an EDDM run.
+ * @return {object} the JSON to PUT.
+ */
+function buildSettings(s, job, eddm) {
   const cfg = s || {};
   const missing = REQUIRED_SETTINGS.filter((k) => !String(cfg[k] || "")
       .trim());
@@ -334,20 +418,37 @@ function presortSettings(s, job) {
     NCOA_LEFT_OUT_FORWARDING : NCOA_LEFT_OUT;
   const piece = job.piece || {};
   const dims = ["heightIn", "lengthIn", "thicknessIn", "weightOz"];
-  if (!PIECE_SIZES.includes(piece.size) ||
+  if (eddm) {
+    const why = piece.size === "FLAT" ? eddmPieceProblem(piece) :
+      "EDDM pieces are flats";
+    if (why) throw new Error(why);
+  } else if (!PIECE_SIZES.includes(piece.size) ||
       !dims.every((k) => Number(piece[k]) > 0)) {
     throw new Error("No Marketing Mail piece size for this product");
   }
-  const pafId = cleanPafId(job.pafId);
-  if (!pafId) {
+  const pafId = eddm ? "" : cleanPafId(job.pafId);
+  if (!eddm && !pafId) {
     throw new Error("No NCOALink PAF on file for the list owner");
   }
   const d = job.mailingDate instanceof Date ? job.mailingDate : new Date();
   const moved = job.moveUpdateDate instanceof Date ?
     job.moveUpdateDate : new Date();
   const digits = (v) => String(v).replace(/\D/g, "");
+  // Move Update (list runs only): NCOALink, run by this very job
+  // (presortProcess), under the list owner's PAF.
+  const moveUpdate = eddm ? {"ncoalink_off": "1"} : {
+    "move_update_method": "NCOALink",
+    "move_update_method_date": mmddyyyy(moved),
+    "list_owner_paf_id": pafId,
+    "ncoalink_off": "0",
+    // 1: flag movers, keep the uploaded address (they're all left out).
+    // 0: write a mover's new address into the address fields (forwarding).
+    "coa_flag_only": job.forwardMovers === true ? "0" : "1",
+    ...Object.fromEntries(NCOA_LEFT_OUT.map((n) => [`filter_ncoa_${n}`,
+      leftOut.includes(n) ? "1" : "0"])),
+  };
   return {
-    "presort_class": "STANDARD MAIL",
+    "presort_class": eddm ? EDDM_CLASS : "STANDARD MAIL",
     // Prepare it as Marketing Mail on our permit even under the minimums
     // (the runner stops for staff instead): never a quiet First-Class or
     // meter switch.
@@ -366,7 +467,9 @@ function presortSettings(s, job) {
     "calculate_container_volume": "1",
     "print_barcode": "1",
     "print_imb": cfg.fullService ? "1" : "0",
-    "include_non_zip4": "0",
+    // EDDM pieces have no ZIP+4 (a route, not an address).
+    "include_non_zip4": eddm ? "1" : "0",
+    // Carrier-route prices: what makes an EDDM run EDDM (AccuZIP).
     "include_crrt": "1",
     // Nonprofit prices only for an organization USPS authorized, under its
     // number (PS Form 3602-N "prepared for").
@@ -402,16 +505,7 @@ function presortSettings(s, job) {
     ...(np ? {"prepared_for_nonprofit_authorization_number": npAuth} : {}),
     "statement_number": "1",
     "mailing_date": mmddyyyy(d),
-    // Move Update by NCOALink, run by this very job (presortProcess).
-    "move_update_method": "NCOALink",
-    "move_update_method_date": mmddyyyy(moved),
-    "list_owner_paf_id": pafId,
-    "ncoalink_off": "0",
-    // 1: flag movers, keep the uploaded address (they're all left out).
-    // 0: write a mover's new address into the address fields (forwarding).
-    "coa_flag_only": job.forwardMovers === true ? "0" : "1",
-    ...Object.fromEntries(NCOA_LEFT_OUT.map((n) => [`filter_ncoa_${n}`,
-      leftOut.includes(n) ? "1" : "0"])),
+    ...moveUpdate,
     "maildat_jobid": String(job.jobId || "").replace(/[^A-Za-z0-9]/g, "")
         .slice(-8),
     "maildat_jobtitle": String(job.title || "").slice(0, 30),
@@ -447,7 +541,8 @@ function presortProcess(pafId) {
  * @param {?object} opts {nonprofit: true} when we asked for nonprofit
  *   prices (presortSettings with job.nonprofit); commercial otherwise.
  *   permitNumber: the permit we asked it to mail on (ours or the
- *   client's), so a job prepared on another permit stops too.
+ *   client's), so a job prepared on another permit stops too. eddm:
+ *   true for an EDDM run (eddmPresortSettings + EDDM_PROCESS).
  * @return {{pieces: ?number, problem: string}} pieces: how many made the
  *   presort (null when AccuZIP didn't say); problem: why staff must
  *   decide how this mails, or "" when it's good to download.
@@ -456,6 +551,7 @@ function presortOutcome(q, process, opts) {
   const r = q || {};
   const up = (v) => String(v == null ? "" : v).trim().toUpperCase();
   const wantPermit = opts && opts.nonprofit ? "NONPROFIT" : "PROFIT";
+  const wantClass = opts && opts.eddm ? EDDM_CLASS : "STANDARD MAIL";
   const wantNumber = opts ? cleanPermitNumber(opts.permitNumber) : "";
   const rateName = (p) => p === "NONPROFIT" ? "nonprofit" :
     p === "PROFIT" ? "commercial" : p.toLowerCase();
@@ -465,9 +561,9 @@ function presortOutcome(q, process, opts) {
   let problem = "";
   if (up(r.task_process) && up(r.task_process) !== up(process)) {
     problem = `AccuZIP ran ${up(r.task_process)}, not ${up(process)}`;
-  } else if (up(r.presort_class) && up(r.presort_class) !== "STANDARD MAIL") {
+  } else if (up(r.presort_class) && up(r.presort_class) !== wantClass) {
     problem = `AccuZIP prepared it as ${up(r.presort_class)}, not ` +
-      "Marketing Mail";
+      (wantClass === EDDM_CLASS ? "EDDM" : "Marketing Mail");
   } else if (up(r.mail_pay_method) && up(r.mail_pay_method) !== "IMPRINT") {
     problem = `AccuZIP moved its postage to ${up(r.mail_pay_method)}, ` +
       "not our permit imprint";
@@ -695,6 +791,18 @@ class AccuzipCloud {
    * @param {string} process presortProcess().
    * @return {Promise<object>} AccuZIP's reply.
    */
+  async processEddm(guid) {
+    const url = `${this.base}/servoy-service/rest_ws/ws_360/job/` +
+      `${encodeURIComponent(guid)}/${EDDM_PROCESS}`;
+    return this.json(await this.fetch(url), EDDM_PROCESS);
+  }
+
+  /**
+   * Start a process (async: AccuZIP calls back when it's done).
+   * @param {string} guid the job.
+   * @param {string} process presortProcess().
+   * @return {Promise<object>} AccuZIP's reply.
+   */
   async process(guid, process) {
     return this.json(await this.fetch(this.jobUrl(guid, process)),
         process);
@@ -728,6 +836,9 @@ module.exports = {
   ID_COLUMN,
   POSTCARD_PIECE,
   PIECE_SIZES,
+  EDDM_PROCESS,
+  EDDM_CLASS,
+  EDDM_FLAT,
   NCOA_LEFT_OUT,
   NCOA_LEFT_OUT_FORWARDING,
   REQUIRED_SETTINGS,
@@ -739,6 +850,8 @@ module.exports = {
   cleanEpsAccount,
   presortCsv,
   presortSettings,
+  eddmPresortSettings,
+  eddmPieceProblem,
   presortProcess,
   presortOutcome,
   tooFewPieces,
