@@ -22,7 +22,9 @@ must never be one the other refuses.
 |---|---|
 | `src/classify.js` | What a CASS result means: verified, corrected, missing_secondary, vacant, undeliverable. |
 | `src/cass.js` | The CASS request row, the POST (at most 20 rows), and the readings of the reply. |
-| `src/presort.js` | AccuZIP's cloud presort: the upload file, the settings (permit, IMb, NCOALink with a PAF), the check of a finished job before its billed download, and the mapping back to recipients. |
+| `src/presort.js` | AccuZIP's cloud presort: the upload file, the settings (permit, IMb, NCOALink with a PAF), the check of a finished job before its billed download, and the mapping back to recipients. Also EDDM runs (`eddmPresortSettings`, `EDDM_PROCESS`). |
+| `src/eddm.js` | EDDM: AccuZIP's carrier-route map (mint, seed, reopen, read the picks, AccuZIP's own household count). Moved from Impulse in 1.4.0. |
+| `web/eddm_map.html` | The route-map page both apps host (copy it into each app's `web/`; each has a test that fails when its copy differs). |
 
 ### Presort options (all off unless the caller asks)
 
@@ -30,6 +32,12 @@ must never be one the other refuses.
 - **`nonprofit: {name, authNumber, address?}`** (since 1.1.0): prices the run as Nonprofit Marketing Mail for an organization USPS has authorized (PS Form 3624). Its name and number go on the postage statement. Pass `{nonprofit: true}` to `presortOutcome` so a finished job priced at the other rate stops before its billed download.
 - **`permit: {number, holderName, holderAddress, crid, dropZip, mailerId?, phone?, nonprofitAuth?}`** (since 1.2.0): mails the run on the CLIENT's own permit. Postage comes out of their permit account, and the mail is entered at the post office that holds the permit (its ZIP replaces the shop's drop ZIP). The shop stays on the statement as the mailing agent, so the agent CRID, the Mailer ID and the barcodes are still ours. `checkClientPermit` is the same check, for a caller that saves permits. Pass `{permitNumber}` to `presortOutcome` (ours or theirs) so a finished job prepared on another permit stops before its billed download.
 - **EPS account** (since 1.3.0): `permit.epsAccount`, or `epsAccount` in the shop's settings for its own permit, goes in the postage statement's **EPS Cust. Ref. No.** (`permit_holder_caps`). It labels the charge on the permit holder's USPS Enterprise Payment System history. The account that pays is still the one the permit is linked to.
+
+### EDDM (since 1.4.0)
+
+- **Routes:** `mintPicker` (Direct Mail key) makes an AccuZIP route map; staff or a buyer pick carrier routes on `web/eddm_map.html`; `readPick` reads the picks and AccuZIP's own count (never the page's numbers). Picking and counting are free.
+- **Permit (BMEU) presort:** `eddmPresortSettings` + `AccuzipCloud.processEddm` (`EDDM_PROCESS`) run a picked map through AccuZIP's EDDM presort on the same permit, rate and mailing agent as a list run, with carrier-route prices, a flat piece (`eddmPieceProblem`) and no Move Update (no names or addresses, so no PAF). `presortOutcome(q, EDDM_PROCESS, {eddm: true})` checks it before the billed download.
+- **Map page options** (in its `#json`): `at: [lat, lng, zoom]` opens a map with nothing saved somewhere (else the whole US), and `geo: 1` makes the page look up searches itself with the Maps geocoder, for a host with no server-side geocoding key.
 
 ## Keys stay with the apps
 

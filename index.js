@@ -10,7 +10,8 @@
  *
  *   classify.js  what a CASS result means (verified, corrected, vacant…)
  *   cass.js      the CASS request and reply, keys passed in
- *   presort.js   AccuZIP's cloud presort for USPS Marketing Mail
+ *   presort.js   AccuZIP's cloud presort for USPS Marketing Mail (and EDDM)
+ *   eddm.js      EDDM carrier routes picked on AccuZIP's map
  */
 
 "use strict";
@@ -18,9 +19,11 @@
 const classify = require("./src/classify");
 const cass = require("./src/cass");
 const presort = require("./src/presort");
+const eddm = require("./src/eddm");
 
 module.exports = {
   ...classify,
   ...cass,
   ...presort,
+  ...eddm,
 };
