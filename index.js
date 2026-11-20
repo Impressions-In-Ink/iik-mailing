@@ -13,6 +13,7 @@
  *   presort.js   AccuZIP's cloud presort: USPS Marketing Mail, First-Class
  *                Mail (since 1.5.0) and EDDM
  *   eddm.js      EDDM carrier routes picked on AccuZIP's map
+ *   estimate.js  the checkout estimate from AccuZIP's free quote
  */
 
 "use strict";
@@ -21,10 +22,12 @@ const classify = require("./src/classify");
 const cass = require("./src/cass");
 const presort = require("./src/presort");
 const eddm = require("./src/eddm");
+const estimate = require("./src/estimate");
 
 module.exports = {
   ...classify,
   ...cass,
   ...presort,
   ...eddm,
+  ...estimate,
 };
