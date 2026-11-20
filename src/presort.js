@@ -1,5 +1,6 @@
 /**
- * presort.js — a mailing, presorted for USPS Marketing Mail
+ * presort.js — a mailing, presorted for USPS Marketing Mail or
+ * First-Class Mail
  * ---------------------------------------------------------------
  * The step after the address check (cass.js + classify.js) for runs of
  * 200+ pieces: AccuZIP's cloud presort puts the run in USPS order and
@@ -45,6 +46,14 @@
  * an organization USPS has authorized; its name and authorization number
  * go on the postage statement as the party the mailing is prepared for.
  *
+ * FIRST-CLASS (since 1.5.0). job.mailClass FIRST_CLASS presorts the run
+ * as First-Class Mail instead: 500 pieces at least, faster, dearer, and
+ * with a postcard price Marketing Mail doesn't have (pieceShape: a card
+ * up to 6 x 9 in is CARD). Its barcodes carry the First-Class service
+ * type matching the shop's Marketing Mail one (serviceTypeFor), and it
+ * has no nonprofit prices. Marketing Mail stays the default, so a caller
+ * that never asks gets exactly what it got before.
+ *
  * NO SILENT SWITCH. Below USPS minimums AccuZIP would quietly prepare the
  * run as First-Class, or move it to metered postage; the settings force
  * our class and payment, and presortOutcome() checks the finished job is
@@ -78,6 +87,69 @@ const POSTCARD_PIECE = Object.freeze({
 /** Marketing Mail piece sizes AccuZIP can presort. CARD is First-Class
  * only, so it never appears here. */
 const PIECE_SIZES = Object.freeze(["LETTER", "FLAT"]);
+
+/** AccuZIP's name for presorted USPS Marketing Mail (QUOTE presort_class):
+ * every run's class unless it asks for First-Class. */
+const MARKETING_MAIL = "STANDARD MAIL";
+
+/** AccuZIP's name for presorted First-Class Mail (QUOTE presort_class,
+ * "FIRST CLASS" in its settings table). */
+const FIRST_CLASS = "FIRST CLASS";
+
+/** USPS minimum for a presorted First-Class run (DMM 233.3.3; AccuZIP: "a
+ * minimum of 500 records for First-Class presort"). */
+const FIRST_CLASS_MIN_PIECES = 500;
+
+/** First-Class piece sizes AccuZIP can presort: CARD (the postcard price;
+ * AccuZIP: CARD needs presort_class FIRST CLASS), letters and flats. */
+const FIRST_CLASS_PIECE_SIZES = Object.freeze(["CARD", "LETTER", "FLAT"]);
+
+/**
+ * A card the First-Class postcard price takes (DMM 201.1.2.1, read
+ * 2026-11-19): 3-1/2 x 5 in up to 6 x 9 in (the commercial postcard since
+ * 2021; 4-1/4 x 6 in is the limit for a STAMPED card, not a presorted
+ * postcard), 0.007 to 0.016 in thick, and at least 0.009 in once it's
+ * taller than 4-1/4 in or longer than 6 in; length / height 1.3 to 2.5,
+ * except an 11 x 8-1/2 sheet cut in four (5-1/2 x 4-1/4, 1.294); and
+ * 3.5 oz at most for a presorted machinable card (201.1.2.2). A card
+ * outside these pays the letter price (DMM 233.6.1). Inches and ounces.
+ */
+const CARD_LIMITS = Object.freeze({
+  minHeightIn: 3.5,
+  minLengthIn: 5,
+  minThicknessIn: 0.007,
+  maxHeightIn: 6,
+  maxLengthIn: 9,
+  maxThicknessIn: 0.016,
+  thickOverHeightIn: 4.25,
+  thickOverLengthIn: 6,
+  thickMinIn: 0.009,
+  minAspect: 1.3,
+  maxAspect: 2.5,
+  maxWeightOz: 3.5,
+});
+
+/** Letter-size by USPS dimensions (DMM 201.1.1): anything bigger in any
+ * of these is a flat. Inches. */
+const LETTER_LIMITS = Object.freeze({
+  maxHeightIn: 6.125,
+  maxLengthIn: 11.5,
+  maxThicknessIn: 0.25,
+});
+
+/**
+ * USPS IMb service types with no address corrections (STID table,
+ * 2024-01-21), each Marketing Mail one to its First-Class match: Basic,
+ * Basic with IV-MTR, Full-Service, Full-Service with IV-MTR. The shop's
+ * settings hold one service type; a First-Class run's barcodes carry the
+ * match (AccuZIP: make certain the Service Type matches the class).
+ */
+const FIRST_CLASS_STIDS = Object.freeze({
+  "301": "300",
+  "311": "310",
+  "261": "260",
+  "271": "270",
+});
 
 /**
  * AccuZIP's process for an EDDM run (its EDDM Postman collection). A run
@@ -133,12 +205,114 @@ const REQUIRED_SETTINGS = Object.freeze([
 ]);
 
 /**
+ * The fewest pieces a presort of a class may have. PURE.
+ * @param {?string} mailClass FIRST_CLASS, or Marketing Mail (anything
+ *   else).
+ * @return {number} 500 for First-Class, 200 for Marketing Mail.
+ */
+function presortMinPieces(mailClass) {
+  return mailClass === FIRST_CLASS ? FIRST_CLASS_MIN_PIECES :
+    PRESORT_MIN_PIECES;
+}
+
+/**
  * Whether a run is big enough to presort. PURE.
  * @param {number} mailable pieces that will mail.
- * @return {boolean} true at 200+.
+ * @param {?string=} mailClass as presortMinPieces (Marketing Mail when
+ *   left out).
+ * @return {boolean} true at 200+ (500+ for First-Class).
  */
-function needsPresort(mailable) {
-  return Number(mailable) >= PRESORT_MIN_PIECES;
+function needsPresort(mailable, mailClass) {
+  return Number(mailable) >= presortMinPieces(mailClass);
+}
+
+/**
+ * A piece's long and short sides, whichever way round it was given.
+ * PURE.
+ * @param {object} piece {heightIn, lengthIn, thicknessIn, weightOz}.
+ * @return {{L: number, H: number, T: number, W: number}}
+ */
+function sidesOf(piece) {
+  const p = piece || {};
+  const a = Number(p.lengthIn);
+  const b = Number(p.heightIn);
+  return {L: Math.max(a, b), H: Math.min(a, b), T: Number(p.thicknessIn),
+    W: Number(p.weightOz)};
+}
+
+/**
+ * Why a piece doesn't get the First-Class postcard price, or "" when it
+ * does (CARD_LIMITS). A weight left out isn't held against it. PURE.
+ * @param {object} piece {heightIn, lengthIn, thicknessIn, weightOz?}.
+ * @return {string} the reason, in words staff read.
+ */
+function cardProblem(piece) {
+  const {L, H, T, W} = sidesOf(piece);
+  const c = CARD_LIMITS;
+  const e = 1e-6;
+  if (!(L > 0 && H > 0 && T > 0)) {
+    return "Give the card's size and thickness";
+  }
+  if (H < c.minHeightIn - e || L < c.minLengthIn - e) {
+    return "A postcard is at least 3-1/2 x 5 in";
+  }
+  if (H > c.maxHeightIn + e || L > c.maxLengthIn + e) {
+    return "A postcard is at most 6 x 9 in; bigger cards pay the letter " +
+      "price";
+  }
+  if (T > c.maxThicknessIn + e) {
+    return "A postcard is at most 0.016 in thick";
+  }
+  const big = H > c.thickOverHeightIn + e || L > c.thickOverLengthIn + e;
+  if (T < (big ? c.thickMinIn : c.minThicknessIn) - e) {
+    return big ? "A postcard over 4-1/4 x 6 in is at least 0.009 in thick" :
+      "A postcard is at least 0.007 in thick";
+  }
+  const aspect = L / H;
+  const quarterSheet = Math.abs(L - 5.5) < 0.01 && Math.abs(H - 4.25) < 0.01;
+  if (!quarterSheet &&
+      (aspect < c.minAspect - e || aspect > c.maxAspect + e)) {
+    return "A postcard's length is 1.3 to 2.5 times its height";
+  }
+  if (W > c.maxWeightOz + e) return "A postcard weighs 3.5 oz at most";
+  return "";
+}
+
+/**
+ * The USPS shape a piece is priced as in a class: CARD (First-Class only,
+ * a card within CARD_LIMITS), LETTER (LETTER_LIMITS) or FLAT. Marketing
+ * Mail has no postcard price, so any card is a letter there. PURE.
+ * @param {object} piece {heightIn, lengthIn, thicknessIn, weightOz?}.
+ * @param {?string} mailClass FIRST_CLASS, or Marketing Mail (anything
+ *   else).
+ * @return {string} CARD | LETTER | FLAT, or "" without a size.
+ */
+function pieceShape(piece, mailClass) {
+  const {L, H, T} = sidesOf(piece);
+  if (!(L > 0 && H > 0)) return "";
+  if (mailClass === FIRST_CLASS && cardProblem(piece) === "") return "CARD";
+  const l = LETTER_LIMITS;
+  return H <= l.maxHeightIn + 1e-6 && L <= l.maxLengthIn + 1e-6 &&
+    !(T > l.maxThicknessIn + 1e-6) ? "LETTER" : "FLAT";
+}
+
+/**
+ * The IMb service type a run's barcodes carry: the shop's setting as is
+ * for Marketing Mail, its First-Class match (FIRST_CLASS_STIDS) for a
+ * First-Class run. PURE.
+ * @param {*} stid the shop's service type id.
+ * @param {?string} mailClass FIRST_CLASS, or Marketing Mail.
+ * @return {string} three digits.
+ * @throws {Error} for a First-Class run when the setting has no match.
+ */
+function serviceTypeFor(stid, mailClass) {
+  const d = String(stid == null ? "" : stid).replace(/\D/g, "");
+  if (mailClass !== FIRST_CLASS) return d;
+  if (Object.values(FIRST_CLASS_STIDS).includes(d)) return d;
+  if (FIRST_CLASS_STIDS[d]) return FIRST_CLASS_STIDS[d];
+  throw new Error(`The IMb service type ${d || "(none)"} has no ` +
+    "First-Class match: First-Class runs need a no-correction service " +
+    "type (Marketing Mail 301, 311, 261 or 271)");
 }
 
 /**
@@ -329,7 +503,10 @@ function mmddyyyy(d) {
  *   authorized organization, whose number goes on the postage statement.
  *   A third option, also off unless asked for: permit (see
  *   checkClientPermit) mails it on the CLIENT's permit, entered at the
- *   post office that holds it; the shop stays the mailing agent.
+ *   post office that holds it; the shop stays the mailing agent. A
+ *   fourth: mailClass FIRST_CLASS presorts it as First-Class Mail (its
+ *   piece may then be CARD, see pieceShape; no nonprofit prices);
+ *   Marketing Mail otherwise.
  * @return {object} the JSON to PUT.
  * @throws {Error} naming every missing setting, or when the piece or the
  *   PAF is missing: no presort claims NCOALink without one. Also when a
@@ -405,7 +582,20 @@ function buildSettings(s, job, eddm) {
   }
   const cp = theirs ? theirs.permit : null;
   const eps = cp ? cp.epsAccount : cleanEpsAccount(cfg.epsAccount);
+  const wantClass = job.mailClass == null || job.mailClass === "" ?
+    MARKETING_MAIL : job.mailClass;
+  if (wantClass !== MARKETING_MAIL && wantClass !== FIRST_CLASS) {
+    throw new Error(`No such mail class: ${wantClass}`);
+  }
+  const firstClass = wantClass === FIRST_CLASS;
+  if (firstClass && eddm) {
+    throw new Error("EDDM is Marketing Mail; it has no First-Class run");
+  }
   const np = job.nonprofit || null;
+  if (firstClass && np) {
+    throw new Error("Nonprofit prices are Marketing Mail only; First-Class " +
+      "Mail has none");
+  }
   const npAuth = np ? cleanNonprofitAuth(np.authNumber) : "";
   const npName = np ? String(np.name || "").replace(/\s+/g, " ").trim() : "";
   if (np && (!npAuth || !npName)) {
@@ -422,9 +612,12 @@ function buildSettings(s, job, eddm) {
     const why = piece.size === "FLAT" ? eddmPieceProblem(piece) :
       "EDDM pieces are flats";
     if (why) throw new Error(why);
-  } else if (!PIECE_SIZES.includes(piece.size) ||
-      !dims.every((k) => Number(piece[k]) > 0)) {
-    throw new Error("No Marketing Mail piece size for this product");
+  } else if (!(firstClass ? FIRST_CLASS_PIECE_SIZES : PIECE_SIZES)
+      .includes(piece.size) || !dims.every((k) => Number(piece[k]) > 0)) {
+    throw new Error(`No ${firstClass ? "First-Class" : "Marketing Mail"} ` +
+      "piece size for this product");
+  } else if (piece.size === "CARD" && cardProblem(piece)) {
+    throw new Error(cardProblem(piece));
   }
   const pafId = eddm ? "" : cleanPafId(job.pafId);
   if (!eddm && !pafId) {
@@ -448,10 +641,10 @@ function buildSettings(s, job, eddm) {
       leftOut.includes(n) ? "1" : "0"])),
   };
   return {
-    "presort_class": eddm ? EDDM_CLASS : "STANDARD MAIL",
-    // Prepare it as Marketing Mail on our permit even under the minimums
-    // (the runner stops for staff instead): never a quiet First-Class or
-    // meter switch.
+    "presort_class": eddm ? EDDM_CLASS : wantClass,
+    // Prepare it as the class we asked for, on the permit, even under the
+    // minimums (the runner stops for staff instead): never a quiet
+    // First-Class or meter switch.
     "force_presort_class": "1",
     "mail_pay_method_override": "1",
     // A client permit is entered where it's held.
@@ -463,7 +656,8 @@ function buildSettings(s, job, eddm) {
     "weight_value": String(piece.weightOz),
     "weight_unit": "OUNCES",
     "machinability": "MACHINABLE",
-    "tray_type": "MMM",
+    // AccuZIP's own default for First-Class flats is flat trays (0MM).
+    "tray_type": firstClass && piece.size === "FLAT" ? "0MM" : "MMM",
     "calculate_container_volume": "1",
     "print_barcode": "1",
     "print_imb": cfg.fullService ? "1" : "0",
@@ -494,7 +688,7 @@ function buildSettings(s, job, eddm) {
     "mailing_agent_crid": digits(cfg.crid),
     "mailing_agent_edoc_sender_crid": digits(cfg.crid),
     "imb_default_mid": digits(cfg.mailerId),
-    "imb_service_type": digits(cfg.serviceTypeId),
+    "imb_service_type": serviceTypeFor(cfg.serviceTypeId, wantClass),
     "agent_or_mailer_signing_statement": String(cfg.signerName),
     "agent_or_mailer_company": String(cfg.signerCompany),
     "agent_or_mailer_phone": digits(cfg.signerPhone).slice(-10),
@@ -543,6 +737,9 @@ function presortProcess(pafId) {
  *   permitNumber: the permit we asked it to mail on (ours or the
  *   client's), so a job prepared on another permit stops too. eddm:
  *   true for an EDDM run (eddmPresortSettings + EDDM_PROCESS).
+ *   mailClass: FIRST_CLASS for a First-Class run (its own class and its
+ *   500-piece minimum). pieceSize: the size we asked for (CARD, LETTER,
+ *   FLAT), so a run AccuZIP prepared as another stops too.
  * @return {{pieces: ?number, problem: string}} pieces: how many made the
  *   presort (null when AccuZIP didn't say); problem: why staff must
  *   decide how this mails, or "" when it's good to download.
@@ -551,7 +748,12 @@ function presortOutcome(q, process, opts) {
   const r = q || {};
   const up = (v) => String(v == null ? "" : v).trim().toUpperCase();
   const wantPermit = opts && opts.nonprofit ? "NONPROFIT" : "PROFIT";
-  const wantClass = opts && opts.eddm ? EDDM_CLASS : "STANDARD MAIL";
+  const firstClass = Boolean(opts) && !opts.eddm &&
+    opts.mailClass === FIRST_CLASS;
+  const wantClass = opts && opts.eddm ? EDDM_CLASS :
+    firstClass ? FIRST_CLASS : MARKETING_MAIL;
+  const className = firstClass ? "First-Class Mail" : "Marketing Mail";
+  const wantSize = opts ? up(opts.pieceSize) : "";
   const wantNumber = opts ? cleanPermitNumber(opts.permitNumber) : "";
   const rateName = (p) => p === "NONPROFIT" ? "nonprofit" :
     p === "PROFIT" ? "commercial" : p.toLowerCase();
@@ -563,19 +765,24 @@ function presortOutcome(q, process, opts) {
     problem = `AccuZIP ran ${up(r.task_process)}, not ${up(process)}`;
   } else if (up(r.presort_class) && up(r.presort_class) !== wantClass) {
     problem = `AccuZIP prepared it as ${up(r.presort_class)}, not ` +
-      (wantClass === EDDM_CLASS ? "EDDM" : "Marketing Mail");
+      (wantClass === EDDM_CLASS ? "EDDM" : className);
+  } else if (wantSize && up(r.mail_piece_size) &&
+      up(r.mail_piece_size) !== wantSize) {
+    problem = `AccuZIP prepared it as ${up(r.mail_piece_size)} pieces, ` +
+      `not ${wantSize}`;
   } else if (up(r.mail_pay_method) && up(r.mail_pay_method) !== "IMPRINT") {
     problem = `AccuZIP moved its postage to ${up(r.mail_pay_method)}, ` +
       "not our permit imprint";
   } else if (up(r.mail_permit_type) && up(r.mail_permit_type) !== wantPermit) {
     problem = `AccuZIP priced it as ${rateName(up(r.mail_permit_type))} ` +
-      `Marketing Mail, not ${rateName(wantPermit)}`;
+      `${className}, not ${rateName(wantPermit)}`;
   } else if (wantNumber && cleanPermitNumber(r.mail_permit_number) &&
       cleanPermitNumber(r.mail_permit_number) !== wantNumber) {
     problem = "AccuZIP prepared it on permit " +
       `${cleanPermitNumber(r.mail_permit_number)}, not ${wantNumber}`;
-  } else if (pieces !== null && pieces < PRESORT_MIN_PIECES) {
-    problem = tooFewPieces(pieces);
+  } else if (pieces !== null &&
+      pieces < presortMinPieces(firstClass ? FIRST_CLASS : "")) {
+    problem = tooFewPieces(pieces, firstClass ? FIRST_CLASS : "");
   }
   return {pieces, problem};
 }
@@ -583,12 +790,14 @@ function presortOutcome(q, process, opts) {
 /**
  * Why a run that's under the minimum stops. PURE.
  * @param {number} pieces how many would mail.
+ * @param {?string=} mailClass FIRST_CLASS, or Marketing Mail.
  * @return {string} the reason.
  */
-function tooFewPieces(pieces) {
+function tooFewPieces(pieces, mailClass) {
   return `only ${pieces} pieces made the presort once bad and moved ` +
-    `addresses were left out, under the ${PRESORT_MIN_PIECES}-piece ` +
-    "Marketing Mail minimum";
+    `addresses were left out, under the ${presortMinPieces(mailClass)}` +
+    `-piece ${mailClass === FIRST_CLASS ? "First-Class" : "Marketing Mail"}` +
+    " minimum";
 }
 
 /**
@@ -836,6 +1045,17 @@ module.exports = {
   ID_COLUMN,
   POSTCARD_PIECE,
   PIECE_SIZES,
+  MARKETING_MAIL,
+  FIRST_CLASS,
+  FIRST_CLASS_MIN_PIECES,
+  FIRST_CLASS_PIECE_SIZES,
+  CARD_LIMITS,
+  LETTER_LIMITS,
+  FIRST_CLASS_STIDS,
+  presortMinPieces,
+  cardProblem,
+  pieceShape,
+  serviceTypeFor,
   EDDM_PROCESS,
   EDDM_CLASS,
   EDDM_FLAT,
