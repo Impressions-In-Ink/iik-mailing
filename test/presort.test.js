@@ -443,6 +443,54 @@ test("an AccuZIP refusal never leaks its body (it echoes the key)",
       });
     });
 
+test("a refusal says why, in AccuZIP's words, with the key blanked",
+    async () => {
+      // Made-up key and reply: this repo is public.
+      const key = "AB12CD34-0000-1111-2222-333344445555";
+      const {fetchImpl} = scripted([{json: {success: false,
+        message: `Process not allowed for apiKey ${key.toLowerCase()}: ` +
+          "NCOA needs 100 records"}}]);
+      const az = new AccuzipCloud({apiKey: key, fetchImpl});
+      await assert.rejects(az.process("g", "CASS-NCOA"), (err) => {
+        assert.equal(err.message, "AccuZIP CASS-NCOA refused: Process not " +
+          "allowed for apiKey [key]: NCOA needs 100 records");
+        return true;
+      });
+      // No reason given: as before.
+      const quiet = scripted([{json: {success: false}}]);
+      await assert.rejects(new AccuzipCloud({apiKey: key,
+        fetchImpl: quiet.fetchImpl}).quote("g"),
+      {message: "AccuZIP quote refused"});
+    });
+
+test("refusalReason blanks every form of a credential, keeps the rest",
+    () => {
+      const {refusalReason} = require("../src/presort");
+      const key = "zz99-made-up-key";
+      const why = (data) => refusalReason(data, key);
+      // The key as sent, in another case, and URL-encoded.
+      assert.equal(why({message: `bad key ${key}`}), "bad key [key]");
+      assert.equal(why({message: `bad ${key.toUpperCase()}`}), "bad [key]");
+      assert.equal(refusalReason({message: "sent ab%2Fcd"}, "ab/cd"),
+          "sent [key]");
+      // Anything written as a credential, whatever its value.
+      assert.equal(why({error: "apiKey=Q1W2E3 token: abc password=x"}),
+          "apiKey=[key] token: [key] password=[key]");
+      // A long token mixing letters and digits (another key, a job id).
+      assert.equal(why({message: "job 0f1e2d3c4b5a69788796a5b4 failed"}),
+          "job [id] failed");
+      // Setting and process names stay: they are often the reason.
+      assert.equal(why({message: "bad move_update_method_date",
+        task_process: "CASS-NCOA"}),
+      "bad move_update_method_date; task_process: CASS-NCOA");
+      // Nothing to say, and at most 200 characters.
+      assert.equal(why({success: false}), "");
+      assert.equal(why(null), "");
+      const long = why({message: "x ".repeat(300)});
+      assert.equal(long.length, 200);
+      assert.ok(long.endsWith("..."));
+    });
+
 test("the permit holder's EPS account goes in the EPS Cust. Ref. No.",
     () => {
       const {cleanEpsAccount} = require("../src/presort");
