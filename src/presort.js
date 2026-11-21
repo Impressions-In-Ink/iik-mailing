@@ -891,6 +891,62 @@ function presortUpdates(rows, sentIds) {
   return {updates, dropped};
 }
 
+/** The most of AccuZIP's own words a refusal keeps. */
+const REASON_MAX = 200;
+
+/** "apiKey=…", "token: …" and the like: the name stays, the value goes. */
+const CREDENTIAL_PAIR =
+  /\b((?:api[_ -]?)?key|token|secret|password)(\s*[=:]\s*)[^\s,;&]+/gi;
+
+/** A long token that mixes letters and digits: a key, a job id. */
+const LONG_TOKEN =
+  /(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_-]{20,}/g;
+
+/**
+ * AccuZIP's reason for refusing a call, safe to log and to show staff.
+ * PURE.
+ *
+ * AccuZIP's replies echo the API key, so the reason is its own words
+ * with these blanked:
+ * - the key this client sent, in any case and URL-encoded
+ * - anything written as key=…, token=…, secret=… or password=…
+ * - any long token mixing letters and digits (a key in another form, a
+ *   job id)
+ *
+ * Setting names stay (move_update_method_date has no digit): they are
+ * often the reason.
+ * @param {*} data AccuZIP's JSON reply.
+ * @param {string} apiKey the key this client sent.
+ * @return {string} at most REASON_MAX characters, "" when it gave none.
+ */
+function refusalReason(data, apiKey) {
+  const d = data && typeof data === "object" ? data : {};
+  const parts = [];
+  for (const [k, v] of Object.entries(d)) {
+    if (k === "success" || v === null || v === undefined ||
+      typeof v === "object") {
+      continue;
+    }
+    const text = String(v).trim();
+    if (!text) continue;
+    parts.push(/^(message|msg|error|reason|description|status)$/i.test(k) ?
+      text : `${k}: ${text}`);
+  }
+  let s = parts.join("; ");
+  const key = String(apiKey || "");
+  if (key.length >= 4) {
+    for (const form of new Set([key, encodeURIComponent(key)])) {
+      const esc = form.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      s = s.replace(new RegExp(esc, "gi"), "[key]");
+    }
+  }
+  s = s.replace(CREDENTIAL_PAIR, "$1$2[key]")
+      .replace(LONG_TOKEN, "[id]")
+      .replace(/\s+/g, " ")
+      .trim();
+  return s.length > REASON_MAX ? `${s.slice(0, REASON_MAX - 3)}...` : s;
+}
+
 /**
  * A thin AccuZIP Direct Mail (ws_360) client. Every call goes through
  * the injected fetch, so the request shapes are tested without a network.
@@ -917,8 +973,10 @@ class AccuzipCloud {
   }
 
   /**
-   * JSON from a response, or a clear error (never the body: AccuZIP
-   * echoes the API key in its error messages).
+   * JSON from a response, or a clear error. A refusal carries AccuZIP's
+   * own reason with the API key blanked (refusalReason): AccuZIP echoes
+   * the key in its error messages, and without the reason a refusal
+   * can't be told from another.
    * @param {object} res the fetch response.
    * @param {string} what the call, for the error.
    * @return {Promise<object>} the JSON.
@@ -927,7 +985,8 @@ class AccuzipCloud {
     if (!res.ok) throw new Error(`AccuZIP ${what}: HTTP ${res.status}`);
     const data = await res.json();
     if (data && data.success === false) {
-      throw new Error(`AccuZIP ${what} refused`);
+      const why = refusalReason(data, this.apiKey);
+      throw new Error(`AccuZIP ${what} refused${why ? `: ${why}` : ""}`);
     }
     return data || {};
   }
@@ -1078,4 +1137,5 @@ module.exports = {
   parseCsv,
   presortUpdates,
   AccuzipCloud,
+  refusalReason,
 };
